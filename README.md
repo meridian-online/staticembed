@@ -76,9 +76,12 @@ The cache is bounded rather than unlimited: it holds two generations of `capacit
 Needs a Rust toolchain, Python 3 for the packaging and test scripts, and the `duckdb` CLI for the SQL tests.
 
 ```
-make check        # formatting, clippy, Rust tests, the artifact, and the SQL tests
-make extension    # just the loadable artifact, in build/
+make check           # formatting, clippy, Rust tests, the artifact, and the SQL tests
+make extension       # just the loadable artifact, in build/
+make mutation-check  # break the code on purpose and require the tests to notice
 ```
+
+`make check` is what CI runs. `make mutation-check` is not in CI, because each of its SQL mutations rebuilds the release binary; it applies a table of deliberate defects one at a time and fails unless the test named against each one reddens, which is the difference between a suite that is green and a suite that is watching.
 
 The model is compiled into the binary, so the artifact is large — most of it is weights. Loading it needs `duckdb -unsigned` until a signed build exists in the community registry:
 

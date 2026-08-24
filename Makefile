@@ -31,7 +31,7 @@ DUCKDB_PLATFORM ?= $(if $(CLI_PLATFORM),$(CLI_PLATFORM),$(UNAME_PLATFORM))
 BUILD_DIR := build
 EXTENSION := $(BUILD_DIR)/$(EXTENSION_NAME).duckdb_extension
 
-.PHONY: all check build extension test test-sql no-network fmt clippy clean
+.PHONY: all check build extension test test-sql no-network mutation-check fmt clippy clean
 
 all: extension
 
@@ -67,6 +67,13 @@ no-network: extension
 ## Needs the duckdb CLI on PATH.
 test-sql: extension
 	python3 scripts/run_sql_tests.py --extension $(EXTENSION) --duckdb $(DUCKDB)
+
+## Break the code on purpose and require the named test to redden. NOT part of
+## `check`: every SQL mutation rebuilds the release cdylib, so a sweep is
+## minutes. Run it when you change a test or the code under one. Needs a clean
+## tree — mutations are undone with `git checkout --`.
+mutation-check:
+	python3 scripts/mutation_check.py --duckdb $(DUCKDB)
 
 fmt:
 	cargo fmt --all -- --check

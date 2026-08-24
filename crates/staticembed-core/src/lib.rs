@@ -59,7 +59,7 @@ pub struct Stats {
 }
 
 /// Width of every vector this build returns.
-pub fn dim() -> Result<usize, &'static str> {
+pub fn dim() -> Result<usize, String> {
     Ok(model::bundled()?.dim())
 }
 
@@ -67,7 +67,7 @@ pub fn dim() -> Result<usize, &'static str> {
 /// under the same model.
 ///
 /// See the crate docs for what comes back for text with no tokens.
-pub fn embed(text: &str) -> Result<Arc<[f32]>, &'static str> {
+pub fn embed(text: &str) -> Result<Arc<[f32]>, String> {
     let model = model::bundled()?;
     let key = cache::cache_key(model.key(), text);
 
@@ -80,15 +80,15 @@ pub fn embed(text: &str) -> Result<Arc<[f32]>, &'static str> {
     // second insert is a no-op. `ENCODED` counts real encoder invocations, which
     // is the number AC4 is about.
     ENCODED.fetch_add(1, Ordering::Relaxed);
-    let vector: Arc<[f32]> = Arc::from(model.embed(text).into_boxed_slice());
+    let vector: Arc<[f32]> = Arc::from(model.embed(text)?.into_boxed_slice());
     cache().insert(key, Arc::clone(&vector));
     Ok(vector)
 }
 
 /// Embed one string without consulting or filling the cache.
-pub fn embed_uncached(text: &str) -> Result<Vec<f32>, &'static str> {
+pub fn embed_uncached(text: &str) -> Result<Vec<f32>, String> {
     ENCODED.fetch_add(1, Ordering::Relaxed);
-    Ok(model::bundled()?.embed(text))
+    model::bundled()?.embed(text)
 }
 
 /// Current cache counters.
@@ -172,16 +172,30 @@ mod tests {
         assert!(second_pass.hits > first_pass.hits);
     }
 
-    /// A cache hit returns the same vector the encoder produced, not a stale or
-    /// empty one.
+    /// A cache HIT returns the vector the encoder produced.
+    ///
+    /// The second `embed` is the point. The first is a miss and returns the
+    /// freshly computed vector whatever was written to the cache, so a test that
+    /// only called it once would pass against a cache that stored rubbish.
     #[test]
-    fn a_cached_vector_equals_the_uncached_one() {
+    fn a_vector_read_back_from_the_cache_equals_the_uncached_one() {
         let _guard = serial();
         clear_cache();
         let text = "a supplier of precision bearings";
-        let cached = embed(text).expect("embed");
+
+        let on_miss = embed(text).expect("embed");
+        let encodes_after_miss = stats().encoded;
+
+        let on_hit = embed(text).expect("embed");
+        assert_eq!(
+            stats().encoded,
+            encodes_after_miss,
+            "the second call must be a cache hit, or this proves nothing"
+        );
+
         let direct = embed_uncached(text).expect("embed");
-        assert_eq!(cached.as_ref(), direct.as_slice());
+        assert_eq!(on_hit.as_ref(), direct.as_slice(), "hit vs encoder");
+        assert_eq!(on_miss.as_ref(), on_hit.as_ref(), "miss vs hit");
     }
 
     #[test]

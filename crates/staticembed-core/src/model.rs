@@ -33,6 +33,25 @@ const CONFIG: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json
 /// plain SHA-256 of any one asset.
 const MODEL_KEY_DOMAIN: &[u8] = b"staticembed/model-key/v1";
 
+/// Derive a model's content address from the three asset files it is made of.
+///
+/// Taken as arguments rather than read from the embedded constants so that a
+/// test can hand it altered bytes and see the key move. A version of this that
+/// hashed only some of its arguments would pass any test that recomputed the
+/// same fields beside it; it cannot pass one that calls it twice.
+pub fn model_key(tokenizer: &[u8], weights: &[u8], config: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(MODEL_KEY_DOMAIN);
+    hasher.update(MODEL_ID.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(MODEL_REVISION.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(tokenizer);
+    hasher.update(weights);
+    hasher.update(config);
+    hasher.finalize().into()
+}
+
 /// A loaded static embedding model.
 pub struct Model {
     inner: StaticModel,
@@ -68,16 +87,7 @@ impl Model {
             ));
         }
 
-        let mut hasher = Sha256::new();
-        hasher.update(MODEL_KEY_DOMAIN);
-        hasher.update(MODEL_ID.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(MODEL_REVISION.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(TOKENIZER);
-        hasher.update(WEIGHTS);
-        hasher.update(CONFIG);
-        let key: [u8; 32] = hasher.finalize().into();
+        let key = model_key(TOKENIZER, WEIGHTS, CONFIG);
 
         Ok(Model { inner, dim, key })
     }
@@ -118,16 +128,29 @@ impl Model {
     /// `NULL`. A caller that wants the zero vector for a missing value asks for
     /// it: `embed(coalesce(t, ''))`.
     ///
-    /// The `dim` fallback below returns the same value the encoder returns for
-    /// no-token input, so it changes no embedding — it only guarantees the
-    /// width when the encoder returns nothing at all.
-    pub fn embed(&self, text: &str) -> Vec<f32> {
-        let vector = self.inner.encode_single(text);
-        if vector.len() == self.dim {
-            vector
-        } else {
-            vec![0.0_f32; self.dim]
-        }
+    /// A vector of any width other than [`Model::dim`] or zero is a bug in the
+    /// encoder, and comes back as an error rather than as silent zeros: a query
+    /// that fails is recoverable, and a column of zero vectors that looks like
+    /// data is not.
+    pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
+        conform(self.inner.encode_single(text), self.dim)
+    }
+}
+
+/// Apply the width contract to whatever the encoder returned.
+///
+/// A pure function rather than a `match` inline in [`Model::embed`], because the
+/// error arm is unreachable from outside the crate and a test that could only
+/// call `embed` could never reach it.
+fn conform(vector: Vec<f32>, dim: usize) -> Result<Vec<f32>, String> {
+    match vector.len() {
+        width if width == dim => Ok(vector),
+        // The no-token contract: nothing to average is the zero vector, at the
+        // model's full width.
+        0 => Ok(vec![0.0_f32; dim]),
+        width => Err(format!(
+            "the encoder returned {width} floats for a model {dim} wide"
+        )),
     }
 }
 
@@ -175,7 +198,9 @@ mod tests {
     #[test]
     fn ordinary_text_gets_a_full_width_non_zero_vector() {
         let model = bundled().expect("the bundled model loads");
-        let vector = model.embed("a manufacturer of industrial fasteners in Sheffield");
+        let vector = model
+            .embed("a manufacturer of industrial fasteners in Sheffield")
+            .expect("embed");
         assert_eq!(vector.len(), model.dim());
         let norm: f32 = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!(norm > 0.5, "expected a normalised vector, got norm {norm}");
@@ -185,13 +210,19 @@ mod tests {
     #[test]
     fn embedding_is_deterministic() {
         let model = bundled().expect("the bundled model loads");
-        assert_eq!(model.embed("repeatable"), model.embed("repeatable"));
+        assert_eq!(
+            model.embed("repeatable").expect("embed"),
+            model.embed("repeatable").expect("embed")
+        );
     }
 
     #[test]
     fn different_strings_get_different_vectors() {
         let model = bundled().expect("the bundled model loads");
-        assert_ne!(model.embed("bicycle"), model.embed("sovereign debt"));
+        assert_ne!(
+            model.embed("bicycle").expect("embed"),
+            model.embed("sovereign debt").expect("embed")
+        );
     }
 
     /// The empty-tokenisation contract, pinned.
@@ -213,7 +244,7 @@ mod tests {
             "\u{16A0}\u{16A2}\u{16A6}",
             "\u{1F701}\u{1F702}\u{1F703}",
         ] {
-            let vector = model.embed(text);
+            let vector = model.embed(text).expect("embed");
             assert_eq!(vector.len(), model.dim(), "width for {text:?}");
             assert!(
                 vector.iter().all(|v| *v == 0.0),
@@ -222,30 +253,75 @@ mod tests {
         }
     }
 
-    /// The model key is a content address: it moves when the assets move.
+    /// The model key is a content address: flipping one byte of any of the three
+    /// assets moves it.
+    ///
+    /// This calls `model_key` itself rather than recomputing the same fields
+    /// beside it. A version that recomputed them would still pass with an asset
+    /// dropped from the production hash, because the test's own copy would keep
+    /// including it — which is what this test used to do.
     #[test]
-    fn the_model_key_covers_the_asset_bytes() {
-        let model = bundled().expect("the bundled model loads");
-        let live = model.key_hex();
-        assert_eq!(live.len(), 64);
+    fn the_model_key_covers_every_asset_byte() {
+        let live = model_key(TOKENIZER, WEIGHTS, CONFIG);
+        assert_eq!(hex(&live).len(), 64);
 
-        // Recompute with one byte of the weights flipped. Nothing else changes.
-        let mut mutated = WEIGHTS.to_vec();
-        let last = mutated.len() - 1;
-        mutated[last] ^= 0x01;
-        let mut hasher = Sha256::new();
-        hasher.update(MODEL_KEY_DOMAIN);
-        hasher.update(MODEL_ID.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(MODEL_REVISION.as_bytes());
-        hasher.update([0u8]);
-        hasher.update(TOKENIZER);
-        hasher.update(&mutated);
-        hasher.update(CONFIG);
+        let flip_last = |bytes: &[u8]| {
+            let mut copy = bytes.to_vec();
+            let last = copy.len() - 1;
+            copy[last] ^= 0x01;
+            copy
+        };
+
         assert_ne!(
             live,
-            hex(&hasher.finalize()),
-            "one flipped weight byte must change the model key"
+            model_key(&flip_last(TOKENIZER), WEIGHTS, CONFIG),
+            "tokenizer"
+        );
+        assert_ne!(
+            live,
+            model_key(TOKENIZER, &flip_last(WEIGHTS), CONFIG),
+            "weights"
+        );
+        assert_ne!(
+            live,
+            model_key(TOKENIZER, WEIGHTS, &flip_last(CONFIG)),
+            "config"
+        );
+    }
+
+    /// The key a loaded model reports is the key its own asset bytes derive.
+    #[test]
+    fn the_loaded_model_reports_the_key_its_assets_derive() {
+        let model = bundled().expect("the bundled model loads");
+        assert_eq!(model.key(), &model_key(TOKENIZER, WEIGHTS, CONFIG));
+    }
+
+    /// A full-width vector passes through untouched.
+    #[test]
+    fn conform_leaves_a_full_width_vector_alone() {
+        assert_eq!(
+            conform(vec![1.0, 2.0, 3.0, 4.0], 4),
+            Ok(vec![1.0, 2.0, 3.0, 4.0])
+        );
+    }
+
+    /// Nothing to average becomes the zero vector at full width.
+    #[test]
+    fn conform_turns_an_empty_vector_into_a_full_width_zero_vector() {
+        assert_eq!(conform(vec![], 4), Ok(vec![0.0, 0.0, 0.0, 0.0]));
+    }
+
+    /// Any other width is a bug in the encoder and is reported, not padded.
+    ///
+    /// Silent padding here would turn a dimension mismatch into a column of
+    /// plausible-looking zeros, which nothing downstream could distinguish from
+    /// text that genuinely had no tokens.
+    #[test]
+    fn conform_reports_any_other_width_rather_than_padding_it() {
+        let reported = conform(vec![1.0, 2.0, 3.0], 4).expect_err("a short vector is an error");
+        assert!(
+            reported.contains('3') && reported.contains('4'),
+            "{reported}"
         );
     }
 }

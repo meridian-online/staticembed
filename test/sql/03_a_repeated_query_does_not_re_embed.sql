@@ -43,3 +43,18 @@ SELECT must('after a clear the same query embeds again',
     (SELECT staticembed_cache_stats().encoded) = 3);
 SELECT must('the vectors after a clear are the same vectors',
     (SELECT count(*) FROM run1 a, run3 b WHERE a.s = b.s AND a.v IS DISTINCT FROM b.v) = 0);
+
+-- The counters must be re-read within a single statement, not folded to one
+-- constant. DuckDB evaluates a zero-argument scalar once and reuses the answer
+-- unless the function declares itself volatile, which would make every reading
+-- above the first in any statement a stale copy of the first.
+CREATE TABLE within_one_statement AS
+    SELECT staticembed_cache_stats().entries AS first_reading,
+           staticembed_cache_clear()         AS dropped,
+           staticembed_cache_stats().entries AS second_reading;
+
+SELECT must('the clear inside that statement dropped the entries',
+    (SELECT dropped FROM within_one_statement) = 3);
+SELECT must('two readings of the counter in one statement are not one folded constant',
+    (SELECT first_reading FROM within_one_statement)
+    <> (SELECT second_reading FROM within_one_statement));

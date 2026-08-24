@@ -62,40 +62,66 @@ MUTATIONS: list[Mutation] = [
         old='const WEIGHTS: &[u8] = include_bytes!("../../../models/potion-base-8M/model.safetensors");',
         new='const WEIGHTS: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json");',
         expect_red="bundled_asset_digests_match_the_pinned_release",
-    ),
-    Mutation(
-        name="embed_always_takes_the_no_token_fallback",
-        file=f"{CORE}/model.rs",
-        old="        if vector.len() == self.dim {\n            vector\n        } else {",
-        new="        if false {\n            vector\n        } else {",
-        expect_red="ordinary_text_gets_a_full_width_non_zero_vector",
-        also_reddens=["different_strings_get_different_vectors"],
-    ),
-    Mutation(
-        name="embed_returns_a_vector_one_float_short",
-        file=f"{CORE}/model.rs",
-        old="        let vector = self.inner.encode_single(text);",
-        new="        let mut vector = self.inner.encode_single(text);\n        vector.truncate(self.dim - 1);",
-        expect_red="every_vector_has_the_declared_width",
-    ),
-    Mutation(
-        name="the_empty_string_is_given_a_one_vector_instead_of_a_zero_vector",
-        file=f"{CORE}/model.rs",
-        old="        let vector = self.inner.encode_single(text);",
-        new="        if text.trim().is_empty() {\n            return vec![1.0_f32; self.dim];\n        }\n        let vector = self.inner.encode_single(text);",
-        expect_red="text_with_no_tokens_gets_a_zero_vector_of_full_width",
+        also_reddens=["the_bundled_model_loads_from_embedded_bytes"],
     ),
     Mutation(
         name="the_model_key_stops_covering_the_weights",
         file=f"{CORE}/model.rs",
-        old="        hasher.update(TOKENIZER);\n        hasher.update(WEIGHTS);\n        hasher.update(CONFIG);\n        let key: [u8; 32] = hasher.finalize().into();",
-        new="        hasher.update(TOKENIZER);\n        hasher.update(CONFIG);\n        let key: [u8; 32] = hasher.finalize().into();",
-        expect_red="the_model_key_covers_the_asset_bytes",
+        old="    hasher.update(tokenizer);\n    hasher.update(weights);\n    hasher.update(config);",
+        new="    hasher.update(tokenizer);\n    let _ = weights;\n    hasher.update(config);",
+        expect_red="the_model_key_covers_every_asset_byte",
+    ),
+    Mutation(
+        name="the_loaded_model_keys_itself_off_the_wrong_bytes",
+        file=f"{CORE}/model.rs",
+        old="        let key = model_key(TOKENIZER, WEIGHTS, CONFIG);",
+        new="        let key = model_key(CONFIG, CONFIG, CONFIG);",
+        expect_red="the_loaded_model_reports_the_key_its_assets_derive",
+    ),
+    # ── the width contract ───────────────────────────────────────────────────
+    Mutation(
+        name="conform_rewrites_a_full_width_vector",
+        file=f"{CORE}/model.rs",
+        old="        width if width == dim => Ok(vector),",
+        new="        width if width == dim => Ok(vec![0.0_f32; width]),",
+        expect_red="conform_leaves_a_full_width_vector_alone",
+        also_reddens=["ordinary_text_gets_a_full_width_non_zero_vector"],
+    ),
+    Mutation(
+        name="the_no_token_zero_vector_comes_back_one_float_short",
+        file=f"{CORE}/model.rs",
+        old="        0 => Ok(vec![0.0_f32; dim]),",
+        new="        0 => Ok(vec![0.0_f32; dim - 1]),",
+        expect_red="conform_turns_an_empty_vector_into_a_full_width_zero_vector",
+        also_reddens=["every_vector_has_the_declared_width"],
+    ),
+    Mutation(
+        name="a_wrong_width_vector_is_padded_instead_of_reported",
+        file=f"{CORE}/model.rs",
+        old='        width => Err(format!(\n            "the encoder returned {width} floats for a model {dim} wide"\n        )),',
+        new="        _ => Ok(vec![0.0_f32; dim]),",
+        expect_red="conform_reports_any_other_width_rather_than_padding_it",
+    ),
+    # ── embedding ────────────────────────────────────────────────────────────
+    Mutation(
+        name="embed_always_takes_the_no_token_path",
+        file=f"{CORE}/model.rs",
+        old="        conform(self.inner.encode_single(text), self.dim)",
+        new="        let _ = self.inner.encode_single(text);\n        conform(Vec::new(), self.dim)",
+        expect_red="ordinary_text_gets_a_full_width_non_zero_vector",
+        also_reddens=["different_strings_get_different_vectors"],
+    ),
+    Mutation(
+        name="the_empty_string_is_given_a_one_vector_instead_of_a_zero_vector",
+        file=f"{CORE}/model.rs",
+        old="        conform(self.inner.encode_single(text), self.dim)",
+        new="        if text.trim().is_empty() {\n            return Ok(vec![1.0_f32; self.dim]);\n        }\n        conform(self.inner.encode_single(text), self.dim)",
+        expect_red="text_with_no_tokens_gets_a_zero_vector_of_full_width",
     ),
     Mutation(
         name="embed_becomes_stateful_across_calls",
         file=f"{CORE}/model.rs",
-        old="        let vector = self.inner.encode_single(text);",
+        old="        conform(self.inner.encode_single(text), self.dim)",
         new=(
             "        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n"
             "        let mut vector = self.inner.encode_single(text);\n"
@@ -104,16 +130,33 @@ MUTATIONS: list[Mutation] = [
             "                *first += 1.0;\n"
             "            }\n"
             "        }\n"
-            "        let vector = vector;"
+            "        conform(vector, self.dim)"
         ),
         expect_red="embedding_is_deterministic",
+    ),
+    Mutation(
+        name="the_pool_becomes_order_sensitive",
+        file=f"{CORE}/model.rs",
+        old="        conform(self.inner.encode_single(text), self.dim)",
+        new=(
+            "        conform(\n"
+            '            self.inner.encode_single(&format!(\n'
+            '                "{} {}",\n'
+            '                text.split_whitespace().next().unwrap_or(""),\n'
+            "                text\n"
+            "            )),\n"
+            "            self.dim,\n"
+            "        )"
+        ),
+        expect_red="the_pool_is_a_mean_so_order_is_lost_and_repetition_is_not",
+        also_reddens=["case_and_surrounding_whitespace_do_not_change_the_vector"],
     ),
     # ── the cache ────────────────────────────────────────────────────────────
     Mutation(
         name="cache_key_drops_the_model_half",
         file=f"{CORE}/cache.rs",
         old="    hasher.update(CACHE_KEY_DOMAIN);\n    hasher.update(model_key);\n    hasher.update(text.as_bytes());",
-        new="    hasher.update(CACHE_KEY_DOMAIN);\n    hasher.update(text.as_bytes());",
+        new="    hasher.update(CACHE_KEY_DOMAIN);\n    let _ = model_key;\n    hasher.update(text.as_bytes());",
         expect_red="the_model_key_is_part_of_the_cache_key",
         also_reddens=["a_cached_vector_does_not_survive_a_model_change"],
     ),
@@ -146,6 +189,13 @@ MUTATIONS: list[Mutation] = [
         expect_red="a_hit_returns_the_stored_vector_and_counts_as_a_hit",
     ),
     Mutation(
+        name="a_miss_is_not_counted",
+        file=f"{CORE}/cache.rs",
+        old="        self.misses += 1;\n        None",
+        new="        None",
+        expect_red="a_miss_is_counted_and_stores_nothing",
+    ),
+    Mutation(
         name="clearing_leaves_the_counters_where_they_were",
         file=f"{CORE}/cache.rs",
         old="        self.hot.clear();\n        self.cold.clear();\n        self.hits = 0;\n        self.misses = 0;",
@@ -166,7 +216,7 @@ MUTATIONS: list[Mutation] = [
         file=f"{CORE}/lib.rs",
         old="    cache().insert(key, Arc::clone(&vector));",
         new="    cache().insert(key, Arc::from(vec![0.0_f32; vector.len()].into_boxed_slice()));",
-        expect_red="a_cached_vector_equals_the_uncached_one",
+        expect_red="a_vector_read_back_from_the_cache_equals_the_uncached_one",
     ),
     Mutation(
         name="clearing_leaves_the_encode_counter_running",
@@ -182,20 +232,12 @@ MUTATIONS: list[Mutation] = [
         new='            "staticembed {} (model {}@{}, key {}, dim {})",\n            VERSION,\n            "a model",',
         expect_red="describe_names_the_bundled_model_and_the_width",
     ),
-    Mutation(
-        name="the_pool_becomes_order_sensitive_by_prefixing_the_first_token",
-        file=f"{CORE}/model.rs",
-        old="        let vector = self.inner.encode_single(text);",
-        new='        let vector = self\n            .inner\n            .encode_single(&format!("{} {}", text.split_whitespace().next().unwrap_or(""), text));',
-        expect_red="the_pool_is_a_mean_so_order_is_lost_and_repetition_is_not",
-        also_reddens=["case_and_surrounding_whitespace_do_not_change_the_vector"],
-    ),
     # ── the DuckDB surface ───────────────────────────────────────────────────
     Mutation(
         name="sql_null_stops_propagating_and_becomes_a_zero_vector",
         file=GLUE,
         old="                Cell::Null => vectors.push(None),",
-        new="                Cell::Null => vectors.push(Some(staticembed_core::embed(\"\")?)),",
+        new='                Cell::Null => vectors.push(Some(staticembed_core::embed("")?)),',
         expect_red="04_null_and_empty",
         kind="sql",
     ),
@@ -228,9 +270,33 @@ MUTATIONS: list[Mutation] = [
         file=GLUE,
         old="    /// Without this DuckDB folds a zero-argument scalar to a constant and the\n    /// counters would be read once and reused for the rest of the session.\n    fn volatile() -> bool {\n        true\n    }",
         new="",
-        expect_red="01_scalar_composes",
+        expect_red="03_a_repeated_query",
         kind="sql",
-        also_reddens=["03_a_repeated_query", "06_text_the_tokenizer"],
+    ),
+    Mutation(
+        name="the_version_line_truncates_the_model_revision",
+        file=f"{CORE}/lib.rs",
+        old="            &model::MODEL_REVISION[..12],",
+        new="            &model::MODEL_REVISION[..8],",
+        expect_red="02_bundled_model",
+        kind="sql",
+    ),
+    Mutation(
+        name="the_pool_becomes_order_sensitive_seen_from_sql",
+        file=f"{CORE}/model.rs",
+        old="        conform(self.inner.encode_single(text), self.dim)",
+        new=(
+            "        conform(\n"
+            '            self.inner.encode_single(&format!(\n'
+            '                "{} {}",\n'
+            '                text.split_whitespace().next().unwrap_or(""),\n'
+            "                text\n"
+            "            )),\n"
+            "            self.dim,\n"
+            "        )"
+        ),
+        expect_red="06_text_the_tokenizer",
+        kind="sql",
     ),
     Mutation(
         name="a_fifth_function_is_registered",
