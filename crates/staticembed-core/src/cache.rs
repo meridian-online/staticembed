@@ -41,7 +41,8 @@
 //! that this is happening rather than inferring it from a slow query.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
@@ -113,6 +114,44 @@ pub fn allocation_bytes(requested: usize) -> usize {
     if requested == 0 {
         return 0;
     }
+    let mut memo = PROBED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((_, measured)) = memo.iter().find(|(size, _)| *size == requested) {
+        return *measured;
+    }
+    let measured = measure_allocation(requested);
+    memo.push((requested, measured));
+    measured
+}
+
+/// Answers already measured, so a size is probed once per process.
+///
+/// [`capacity_for_budget`] is a binary search that calls [`bytes_for`] about
+/// seventeen times, and without this each call would allocate and free a block
+/// of several megabytes. It also makes `bytes_for` answer identically every
+/// time it is asked, which the search needs and which
+/// `the_probe_is_taken_once_per_size` pins by counting probes.
+///
+/// A probe can over-report — the allocator may serve it from a recycled block
+/// larger than the size class — and can never under-report, since
+/// `malloc_size` is at least the request. So a stale or unlucky answer costs a
+/// slightly smaller cache and can never breach the budget. Measured once under
+/// a loaded process the search returned 49,873 where a quiet one returned
+/// 49,907; that is not reproducible on demand, and no test pins it.
+static PROBED: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// Probes actually taken, so a test can see that the memo is doing its job.
+static PROBES_TAKEN: AtomicU64 = AtomicU64::new(0);
+
+/// How many blocks have been allocated to measure a size class this process.
+pub fn probes_taken() -> u64 {
+    PROBES_TAKEN.load(Ordering::Relaxed)
+}
+
+/// Probe the allocator for a block of `requested` bytes.
+fn measure_allocation(requested: usize) -> usize {
+    PROBES_TAKEN.fetch_add(1, Ordering::Relaxed);
     // 16 is what `hashbrown` aligns its bucket array to and what the system
     // allocator returns anyway; both blocks go through plain `malloc` at this
     // alignment on the platforms probed.
@@ -122,15 +161,16 @@ pub fn allocation_bytes(requested: usize) -> usize {
 
     // SAFETY: `layout` has a non-zero size, the pointer is checked before use,
     // and it is freed with the layout it was allocated with.
-    unsafe {
+    let measured = unsafe {
         let block = std::alloc::alloc(layout);
         if block.is_null() {
             return requested;
         }
-        let measured = allocated_size(block);
+        let size = allocated_size(block);
         std::alloc::dealloc(block, layout);
-        measured.max(requested)
-    }
+        size
+    };
+    measured.max(requested)
 }
 
 /// Bytes one cached vector's heap block costs: an `Arc`'s two reference counts
@@ -179,18 +219,22 @@ pub fn bytes_for(entries: usize, dim: usize) -> usize {
 }
 
 /// The largest number of vectors of width `dim` whose cost stays inside
-/// `budget_bytes`, never fewer than one.
+/// `budget_bytes`.
+///
+/// **Zero when not even one vector fits**, which turns the cache off rather
+/// than letting it hold one vector in defiance of the budget it was given. The
+/// budget is a ceiling at every budget or it is not a ceiling.
 ///
 /// A search rather than a division, because [`bytes_for`] is a step function:
 /// the bucket array doubles rather than growing smoothly, so there is no
-/// per-entry constant to divide by. The old division by a per-entry constant is
+/// per-entry constant to divide by. The division by a per-entry constant is
 /// what let a wrong cost model pass a test that divided and multiplied by the
 /// same constant.
 pub fn capacity_for_budget(budget_bytes: usize, dim: usize) -> usize {
-    let per_vector = vector_bytes(dim);
-    if per_vector == 0 {
-        return 1;
+    if bytes_for(1, dim) > budget_bytes {
+        return 0;
     }
+    let per_vector = vector_bytes(dim).max(1);
     // An upper bound: ignoring the map entirely cannot fit fewer vectors than
     // including it, so the true answer is at or below this.
     let mut high = (budget_bytes / per_vector).max(1);
@@ -235,10 +279,15 @@ pub struct EmbeddingCache {
 
 impl EmbeddingCache {
     /// A cache holding at most `capacity` vectors.
+    ///
+    /// A capacity of zero is a cache that is off: it stores nothing, answers
+    /// every lookup as a miss, and counts every one in
+    /// [`CacheStats::uncached`]. That is what a budget too small for one vector
+    /// buys, and it is better than one vector held against the budget's word.
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: HashMap::new(),
-            capacity: capacity.max(1),
+            capacity,
             hits: 0,
             misses: 0,
             uncached: 0,
@@ -562,7 +611,7 @@ mod tests {
                     "dim {dim} budget {budget} capacity {capacity}"
                 );
                 assert!(
-                    capacity == 1 || bytes_for(capacity + 1, dim) > budget,
+                    capacity <= 1 || bytes_for(capacity + 1, dim) > budget,
                     "dim {dim} budget {budget} capacity {capacity} was not the largest"
                 );
             }
@@ -606,14 +655,55 @@ mod tests {
         assert!(half > full / 3, "{half} against {full}");
     }
 
+    /// A budget too small for one vector turns the cache off rather than
+    /// holding a vector the budget cannot pay for.
     #[test]
-    fn a_budget_too_small_for_one_vector_still_gives_a_usable_cache() {
-        assert_eq!(capacity_for_budget(1, 256), 1);
-        assert_eq!(capacity_for_budget(0, 256), 1);
+    fn a_budget_too_small_for_one_vector_gives_no_cache_at_all() {
+        assert_eq!(capacity_for_budget(0, 256), 0);
+        assert_eq!(capacity_for_budget(1, 256), 0);
+        assert_eq!(capacity_for_budget(bytes_for(1, 256) - 1, 256), 0);
+        assert_eq!(capacity_for_budget(bytes_for(1, 256), 256), 1);
+    }
+
+    /// A cache with no capacity stores nothing and says so.
+    #[test]
+    fn a_cache_with_no_capacity_declines_everything() {
+        let mut cache = EmbeddingCache::with_capacity(0);
+        let key = cache_key(&model_key(0xA0), "anything");
+        assert!(cache.is_full());
+        assert!(!cache.insert(key, vector(1.0)));
+        assert!(cache.get(&key).is_none());
+        let stats = cache.stats();
+        assert_eq!((stats.entries, stats.capacity, stats.uncached), (0, 0, 1));
     }
 
     /// The probe reports at least what the block asked for, and more when the
     /// allocator rounds up.
+    /// A size is probed once and remembered.
+    ///
+    /// Not a claim about speed. The capacity search calls `bytes_for` about
+    /// seventeen times and each probe allocates a block of several megabytes;
+    /// more importantly, `bytes_for` has to answer the same way every time or
+    /// the search's monotonicity assumption does not hold. Counting the probes
+    /// is what makes that checkable — asserting that two calls agree would pass
+    /// whether or not anything was remembered.
+    #[test]
+    fn the_probe_is_taken_once_per_size() {
+        // A size nothing else in this binary asks for.
+        let size = 1_234_576;
+        let first = allocation_bytes(size);
+        let after_first = probes_taken();
+        for _ in 0..50 {
+            assert_eq!(allocation_bytes(size), first);
+        }
+        assert_eq!(
+            probes_taken(),
+            after_first,
+            "the memo let {} further probes through",
+            probes_taken() - after_first
+        );
+    }
+
     /// The probe never reports less than the block needs, for either of the two
     /// blocks the cache holds.
     #[test]

@@ -295,37 +295,59 @@ def self_test() -> int:
 
     # And end to end, against a binary on this machine that really does open
     # sockets. Synthetic input proves the parser; this proves the whole path
-    # from `nm` through to the verdict.
-    networking = next(
-        (
-            candidate
-            for candidate in (
-                pathlib.Path("/usr/bin/nc"),
-                pathlib.Path("/bin/nc"),
-                pathlib.Path("/usr/bin/ping"),
-                pathlib.Path("/bin/ping"),
-                pathlib.Path("/usr/bin/ssh"),
-            )
-            if candidate.is_file()
-        ),
-        None,
-    )
-    if networking is None:
-        print("self-test: SKIPPED the live check — no networking binary found to test against")
+    # from `nm` through to the verdict — and, unlike everything above, it does
+    # not enumerate FORBIDDEN_SYMBOLS to do it.
+    #
+    # That distinction is the point. The loop above iterates over the very list
+    # it is testing, so a name deleted from the list is simply not tested and
+    # the self-test stays green: removing `connect` was invisible to it. Here
+    # the enumeration comes from a real binary. Every name in CORE_SYMBOLS is
+    # one any TCP client must call, so requiring the checker to flag all of them
+    # in a binary that has all of them makes a deleted name fail.
+    #
+    # Beyond CORE_SYMBOLS the list is still a deny-list and nothing here can
+    # prove it complete. What it is is a list of every entry point in the
+    # platform's socket API, and the artifact this gates uses none of them.
+    core_symbols = ("socket", "connect")
+    candidates = [
+        pathlib.Path(path)
+        for path in (
+            "/usr/bin/nc",
+            "/bin/nc",
+            "/usr/bin/ncat",
+            "/usr/bin/ssh",
+            "/usr/bin/ping",
+            "/bin/ping",
+            "/usr/bin/wget",
+        )
+    ]
+    if not shutil.which("nm"):
+        print("self-test: SKIPPED the live check — nm is not available")
     else:
-        live = undefined_symbols(networking)
-        if live is None:
-            print("self-test: SKIPPED the live check — nm is not available")
-        elif not offending_symbols(live):
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            live = undefined_symbols(candidate)
+            if live is None or not all(symbol in live for symbol in core_symbols):
+                continue
+            flagged = offending_symbols(live)
+            missing = [symbol for symbol in core_symbols if symbol not in flagged]
+            if missing:
+                print(
+                    f"self-test FAILED: {candidate} calls {missing} and the check did not "
+                    f"flag them — a name has gone missing from FORBIDDEN_SYMBOLS",
+                    file=sys.stderr,
+                )
+                return 1
             print(
-                f"self-test FAILED: {networking} opens sockets and the check cleared it",
-                file=sys.stderr,
+                f"self-test ok: {candidate} is flagged on all of {list(core_symbols)} "
+                f"and {len(flagged)} socket entry points in total"
             )
-            return 1
+            break
         else:
             print(
-                f"self-test ok: {networking} is correctly flagged "
-                f"({len(offending_symbols(live))} socket entry points found in it)"
+                "self-test: SKIPPED the live check — no binary on this machine has all of "
+                f"{list(core_symbols)} undefined"
             )
 
     print(

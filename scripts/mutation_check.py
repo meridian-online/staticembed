@@ -46,9 +46,12 @@ class Mutation:
     new: str
     #: What must appear as failing. For Rust, the test function name; for SQL,
     #: the substring of the test file name.
-    expect_red: str
-    #: "rust" or "sql".
+    expect_red: str = ""
+    #: "rust", "sql", or "script" — a check that is itself a script, where
+    #: `expect_red` is unused and `command` is what must come back non-zero.
     kind: str = "rust"
+    #: For kind="script": the argv to run, relative to the repo root.
+    command: list[str] = field(default_factory=list)
     #: Extra test names that also legitimately redden; not required, but not
     #: treated as noise either.
     also_reddens: list[str] = field(default_factory=list)
@@ -240,16 +243,20 @@ MUTATIONS: list[Mutation] = [
         new="",
         expect_red="clear_reports_what_it_dropped_and_resets_the_counters",
     ),
-    # ── the memory budget, which nothing pinned before ───────────────────────
-    # Setting the old fixed DEFAULT_CAPACITY to 4 left the whole suite green.
+    # ── the cost model, which nothing measured before ────────────────────────
+    # Round 1 left a bare capacity constant settable to 4 with the suite green.
+    # Round 2 replaced it with a budget and pinned the budget and the division,
+    # neither of which is the cost model the division used. These are the
+    # mutations that reach it, and they reach it by measurement: every one is
+    # caught by filling a cache and asking the allocator.
     Mutation(
         name="the_cache_budget_is_cut_to_a_few_kilobytes",
         file=f"{CORE}/cache.rs",
         old="pub const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;",
         new="pub const DEFAULT_BUDGET_BYTES: usize = 4 * 1024;",
-        expect_red="the_default_budget_holds_at_least_fifty_thousand_vectors",
+        expect_red="the_default_budget_holds_at_least_thirty_thousand_vectors",
         also_reddens=[
-            "a_repeated_query_over_fifty_thousand_distinct_values_re_embeds_none_of_them"
+            "a_repeated_query_over_forty_thousand_distinct_values_re_embeds_none_of_them"
         ],
     ),
     Mutation(
@@ -260,35 +267,209 @@ MUTATIONS: list[Mutation] = [
         expect_red="07_at_the_scale",
         kind="sql",
     ),
+    # The reviewer's own probe: cost a float at one byte. Under the previous
+    # guard the whole suite stayed green at 4.57 times the declared budget.
     Mutation(
-        name="the_budget_is_divided_by_the_vector_alone_ignoring_the_key_and_the_map",
+        name="a_float_is_costed_at_one_byte",
         file=f"{CORE}/cache.rs",
-        old="    (budget_bytes / entry_bytes(dim)).max(1)",
-        new="    (budget_bytes / (dim * std::mem::size_of::<f32>())).max(1)",
-        expect_red="the_capacity_is_the_largest_entry_count_that_fits_the_budget",
+        old="    allocation_bytes(2 * std::mem::size_of::<usize>() + dim * std::mem::size_of::<f32>())",
+        new="    allocation_bytes(2 * std::mem::size_of::<usize>() + dim)",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+    ),
+    # The size-class rounding: ask for the block and then do not ask how big it
+    # really is. Worth 23% of the budget on macOS.
+    Mutation(
+        name="the_allocator_is_not_asked_how_big_the_block_really_is",
+        file=f"{CORE}/cache.rs",
+        old="        let size = allocated_size(block);",
+        new="        let size = 0_usize;\n        let _ = allocated_size(block);",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+    ),
+    # hashbrown's sixteen extra control bytes. Worth 0.02% of the budget, which
+    # is why the ceiling has no tolerance band: any band wide enough to feel
+    # comfortable lets this through.
+    Mutation(
+        name="the_maps_extra_control_group_is_not_charged_for",
+        file=f"{CORE}/cache.rs",
+        old="const CONTROL_GROUP_BYTES: usize = 16;",
+        new="const CONTROL_GROUP_BYTES: usize = 0;",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+    ),
+    # The bucket array is a power of two. Worth 4.5% of the budget.
+    Mutation(
+        name="the_bucket_array_is_not_rounded_to_a_power_of_two",
+        file=f"{CORE}/cache.rs",
+        old="    (entries * 8 / 7).next_power_of_two()",
+        new="    entries * 8 / 7",
+        expect_red="the_bucket_count_is_the_power_of_two_that_holds_the_entries",
+        also_reddens=["a_full_cache_costs_close_to_the_bytes_the_budget_promised"],
     ),
     Mutation(
-        name="a_budget_smaller_than_one_vector_yields_a_cache_that_holds_nothing",
+        name="the_bucket_array_is_not_charged_for_at_all",
         file=f"{CORE}/cache.rs",
-        old="    (budget_bytes / entry_bytes(dim)).max(1)",
-        new="    budget_bytes / entry_bytes(dim)",
-        expect_red="a_budget_too_small_for_one_vector_still_gives_a_usable_cache",
+        old="    bucket_array_bytes(entries).saturating_add(entries.saturating_mul(vector_bytes(dim)))",
+        new="    entries.saturating_mul(vector_bytes(dim))",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+    ),
+    # Perturbing `low` inside the loop instead of the bound would be the obvious
+    # mutation here and it does not terminate: the search sits at the same pair
+    # of bounds forever. It is the upper bound that is safe to break.
+    Mutation(
+        name="the_capacity_search_starts_from_half_the_room_it_has",
+        file=f"{CORE}/cache.rs",
+        old="    let mut high = (budget_bytes / per_vector).max(1);",
+        new="    let mut high = (budget_bytes / per_vector / 2).max(1);",
+        expect_red="the_capacity_search_returns_the_largest_count_the_cost_model_allows",
+    ),
+    Mutation(
+        name="a_budget_too_small_for_one_vector_holds_one_anyway",
+        file=f"{CORE}/cache.rs",
+        old="    if bytes_for(1, dim) > budget_bytes {\n        return 0;\n    }",
+        new="    if bytes_for(1, dim) > budget_bytes {\n        return 1;\n    }",
+        expect_red="a_budget_too_small_for_one_vector_gives_no_cache_at_all",
+    ),
+    Mutation(
+        name="a_zero_capacity_cache_quietly_becomes_a_one_entry_cache",
+        file=f"{CORE}/cache.rs",
+        old="            capacity,\n            hits: 0,",
+        new="            capacity: capacity.max(1),\n            hits: 0,",
+        expect_red="a_cache_with_no_capacity_declines_everything",
+    ),
+    # A floor rather than a cap: "never give less than N" stops the capacity
+    # responding to the budget, which is what the halving test is for.
+    Mutation(
+        name="the_capacity_has_a_silent_floor",
+        file=f"{CORE}/cache.rs",
+        old="    low\n}",
+        new="    low.max(40_000)\n}",
+        expect_red="halving_the_budget_leaves_fewer_than_two_thirds_of_the_capacity",
     ),
     Mutation(
         name="the_capacity_is_silently_capped",
         file=f"{CORE}/cache.rs",
-        old="    (budget_bytes / entry_bytes(dim)).max(1)",
-        new="    (budget_bytes / entry_bytes(dim)).max(1).min(40_000)",
-        expect_red="halving_the_budget_roughly_halves_the_capacity",
-        also_reddens=["the_default_budget_holds_at_least_fifty_thousand_vectors"],
+        old="    low\n}",
+        new="    low.min(40_000)\n}",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+        also_reddens=["the_default_budget_holds_at_least_thirty_thousand_vectors"],
     ),
     Mutation(
         name="an_entry_costs_the_same_whatever_the_model_width",
         file=f"{CORE}/cache.rs",
-        old="    inline_with_slack + ARC_COUNTS + dim * std::mem::size_of::<f32>()",
-        new="    inline_with_slack + ARC_COUNTS + 256 * std::mem::size_of::<f32>()",
+        old="pub fn vector_bytes(dim: usize) -> usize {",
+        new="pub fn vector_bytes(_ignored: usize) -> usize {\n    let dim = 256;",
         expect_red="a_wider_model_gets_fewer_entries_from_the_same_budget",
-        also_reddens=["the_capacity_is_the_largest_entry_count_that_fits_the_budget"],
+    ),
+    Mutation(
+        name="the_allocation_probe_reports_less_than_the_block_needs",
+        file=f"{CORE}/cache.rs",
+        old="    measured.max(requested)",
+        new="    measured.min(requested / 2)",
+        expect_red="the_allocation_probe_never_reports_less_than_the_block_needs",
+    ),
+    # The memo. Counting probes is what makes this checkable: asserting that two
+    # calls agree would pass whether or not anything was remembered, which is the
+    # shape this whole round is about.
+    Mutation(
+        name="the_probe_is_repeated_for_every_call",
+        file=f"{CORE}/cache.rs",
+        old="    if let Some((_, measured)) = memo.iter().find(|(size, _)| *size == requested) {\n        return *measured;\n    }",
+        new="",
+        expect_red="the_probe_is_taken_once_per_size",
+    ),
+    # The floor of the measurement: a model that over-charges buys a cache
+    # smaller than the budget paid for, and the cache is then quietly worse than
+    # it was asked to be rather than broken.
+    Mutation(
+        name="every_vector_is_charged_for_twice",
+        file=f"{CORE}/cache.rs",
+        old="pub fn vector_bytes(dim: usize) -> usize {\n    allocation_bytes(",
+        new="pub fn vector_bytes(dim: usize) -> usize {\n    2 * allocation_bytes(",
+        expect_red="a_full_cache_costs_close_to_the_bytes_the_budget_promised",
+    ),
+    # Clearing gave the vectors back and kept the bucket array — megabytes
+    # withheld from someone who asked for the memory.
+    Mutation(
+        name="clearing_keeps_the_bucket_array",
+        file=f"{CORE}/cache.rs",
+        old="        self.entries = HashMap::new();",
+        new="        self.entries.clear();",
+        expect_red="clearing_the_cache_returns_the_memory_to_the_allocator",
+    ),
+    # ── the width, which was only ever compared to itself ────────────────────
+    Mutation(
+        name="the_encoder_width_drifts_from_the_models_own_config",
+        file=f"{CORE}/model.rs",
+        old='        let dim = inner.encode_single("dimension probe").len();',
+        new='        let dim = inner.encode_single("dimension probe").len().saturating_sub(1);',
+        expect_red="the_encoder_width_matches_the_width_the_config_declares",
+    ),
+    Mutation(
+        name="the_encoder_width_drifts_seen_from_sql",
+        file=f"{CORE}/model.rs",
+        old='        let dim = inner.encode_single("dimension probe").len();',
+        new='        let dim = inner.encode_single("dimension probe").len().saturating_sub(1);',
+        expect_red="01_scalar_composes",
+        kind="sql",
+    ),
+    # ── the checks that are scripts ──────────────────────────────────────────
+    # The symbol parser going blind. The self-test this replaces normalised its
+    # own planted symbol, so deleting this left it green while the macOS check
+    # cleared /usr/bin/nc.
+    Mutation(
+        name="the_symbol_parser_stops_stripping_the_macho_underscore",
+        file="scripts/check_no_network_deps.py",
+        old='        names.append(fields[-1].lstrip("_").split("@", 1)[0])',
+        new='        names.append(fields[-1].split("@", 1)[0])',
+        kind="script",
+        command=["python3", "scripts/check_no_network_deps.py", "--self-test"],
+    ),
+    Mutation(
+        name="the_socket_symbol_list_loses_connect",
+        file="scripts/check_no_network_deps.py",
+        old='    "connect",\n    "connectx",',
+        new='    "connectx",',
+        kind="script",
+        command=["python3", "scripts/check_no_network_deps.py", "--self-test"],
+    ),
+    # The documented surface drifting from the catalog. This is the defect the
+    # check was written for, reproduced.
+    Mutation(
+        name="the_readme_loses_a_field_from_the_stats_struct",
+        file="README.md",
+        old="`STRUCT(hits, misses, encoded, uncached, entries, capacity)`",
+        new="`STRUCT(hits, misses, encoded, entries, capacity)`",
+        kind="script",
+        command=[
+            "python3",
+            "scripts/check_documented_surface.py",
+            "--extension",
+            "build/staticembed.duckdb_extension",
+            "--duckdb",
+            "$DUCKDB",
+        ],
+    ),
+    Mutation(
+        name="the_readme_reorders_the_stats_struct",
+        file="README.md",
+        old="`STRUCT(hits, misses, encoded, uncached, entries, capacity)`",
+        new="`STRUCT(misses, hits, encoded, uncached, entries, capacity)`",
+        kind="script",
+        command=[
+            "python3",
+            "scripts/check_documented_surface.py",
+            "--extension",
+            "build/staticembed.duckdb_extension",
+            "--duckdb",
+            "$DUCKDB",
+        ],
+    ),
+    Mutation(
+        name="the_surface_check_stops_comparing_field_order",
+        file="scripts/check_documented_surface.py",
+        old="        signatures.append([field.split()[0] for field in fields])",
+        new="        signatures.append(sorted(field.split()[0] for field in fields))",
+        kind="script",
+        command=["python3", "scripts/check_documented_surface.py", "--self-test"],
     ),
     # ── the engine's public behaviour ────────────────────────────────────────
     # Not "the first lookup is skipped": that is a fast path, and `recheck`
@@ -466,12 +647,53 @@ MUTATIONS: list[Mutation] = [
 ]
 
 
-def run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, cwd=REPO_ROOT, text=True, capture_output=True, check=False)
+#: A mutated build gets this long to produce a verdict. Ten minutes is far more
+#: than any check here takes; it exists because a mutation can hang rather than
+#: fail, and one did — perturbing the capacity binary search left it looping
+#: forever, and the sweep sat on it for thirty-three minutes.
+TIMEOUT_SECONDS = 600
+
+
+class TookTooLong(Exception):
+    """A mutated run produced no verdict inside the timeout.
+
+    Neither a kill nor a survival: the check might have failed given longer, and
+    counting a hang as either is how a sweep comes to report on work it never
+    finished. Same reasoning as `RanNothing`, different cause.
+    """
+
+
+def run(command: list[str], timeout: float | None = TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            command, cwd=REPO_ROOT, text=True, capture_output=True, check=False, timeout=timeout
+        )
+    except subprocess.TimeoutExpired as expired:
+        raise TookTooLong(
+            f"`{' '.join(command)}` produced no verdict in {timeout:.0f}s"
+        ) from expired
 
 
 def tree_is_clean() -> bool:
     return run(["git", "status", "--porcelain"]).stdout.strip() == ""
+
+
+def check_anchors(mutations: list[Mutation]) -> list[str]:
+    """Every anchor must be present exactly once, checked before anything runs.
+
+    A sweep is minutes; finding out at mutation 25 that mutation 26's anchor
+    moved wastes all of them. Reported together so one edit fixes the lot.
+    """
+    problems = []
+    for mutation in mutations:
+        text = (REPO_ROOT / mutation.file).read_text()
+        found = text.count(mutation.old)
+        if found != 1:
+            problems.append(
+                f"{mutation.name}: anchor appears {found} times in {mutation.file} "
+                f"(it must appear exactly once)"
+            )
+    return problems
 
 
 def apply(mutation: Mutation) -> None:
@@ -509,10 +731,19 @@ class RanNothing(Exception):
     """
 
 
-def rust_test_failed(test_name: str) -> tuple[bool, str]:
+def rust_test_failed(test_name: str, mutated_file: str) -> tuple[bool, str]:
     # No `--exact`: the tests live in a `tests` module, so the bare function
     # name is a substring of the full path rather than equal to it.
-    completed = run(["cargo", "test", "--workspace", test_name, "--", "--nocapture"])
+    #
+    # Scoped to the crate the mutation touched. `--workspace` would relink the
+    # 36 MB cdylib for every Rust mutation, and every Rust mutation is in
+    # staticembed-core; the DuckDB layer's mutations are measured through SQL.
+    scope = (
+        ["-p", "staticembed-core"]
+        if mutated_file.startswith("crates/staticembed-core")
+        else ["--workspace"]
+    )
+    completed = run(["cargo", "test", *scope, test_name, "--", "--nocapture"])
     output = completed.stdout + completed.stderr
 
     executed = sum(int(passed) + int(failed) for passed, failed in TEST_RESULT.findall(output))
@@ -522,6 +753,27 @@ def rust_test_failed(test_name: str) -> tuple[bool, str]:
     if completed.returncode == 0:
         return False, output
     return f"{test_name} ... FAILED" in output or "test result: FAILED" in output, output
+
+
+def script_check_failed(command: list[str], duckdb: str) -> tuple[bool, str]:
+    """A check written as a script: it must come back non-zero under the mutation.
+
+    Some gates in this repo are scripts rather than tests — the socket-symbol
+    check and the documented-surface check — and a mutation of one of those has
+    to be measured by running it. `--extension` builds are done first when the
+    command needs one.
+    """
+    if any("--extension" in argument for argument in command):
+        built = run(["make", "extension"])
+        if built.returncode != 0:
+            raise RanNothing(f"the mutated tree did not build:\n{built.stdout}{built.stderr}")
+    resolved = [sys.executable if part == "python3" else part for part in command]
+    resolved = [duckdb if part == "$DUCKDB" else part for part in resolved]
+    completed = run(resolved)
+    output = completed.stdout + completed.stderr
+    if not output.strip():
+        raise RanNothing(f"{' '.join(command)} produced no output at all")
+    return completed.returncode != 0, output
 
 
 def sql_test_failed(name_fragment: str, duckdb: str) -> tuple[bool, str]:
@@ -553,13 +805,28 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", help="run only mutations whose name contains this substring")
     parser.add_argument("--list", action="store_true", help="print the mutation table and stop")
+    parser.add_argument(
+        "--check-anchors",
+        action="store_true",
+        help="verify every mutation still applies, without running any of them",
+    )
     parser.add_argument("--duckdb", default="duckdb")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    if args.check_anchors:
+        problems = check_anchors(MUTATIONS)
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        if problems:
+            return 2
+        print(f"ok: all {len(MUTATIONS)} mutation anchors still apply")
+        return 0
+
     if args.list:
         for mutation in MUTATIONS:
-            print(f"{mutation.kind:4}  {mutation.name}\n      -> {mutation.expect_red}")
+            target = mutation.expect_red or " ".join(mutation.command)
+            print(f"{mutation.kind:6}  {mutation.name}\n        -> {target}")
         return 0
 
     if not tree_is_clean():
@@ -575,23 +842,37 @@ def main() -> int:
         print(f"no mutation matches {args.only!r}", file=sys.stderr)
         return 2
 
+    problems = check_anchors(selected)
+    if problems:
+        print(
+            "the code moved out from under these mutations; update them rather than "
+            "deleting them:",
+            file=sys.stderr,
+        )
+        for problem in problems:
+            print(f"  {problem}", file=sys.stderr)
+        return 2
+
     survivors = []
     for mutation in selected:
         apply(mutation)
         try:
             if mutation.kind == "rust":
-                reddened, output = rust_test_failed(mutation.expect_red)
+                reddened, output = rust_test_failed(mutation.expect_red, mutation.file)
+            elif mutation.kind == "script":
+                reddened, output = script_check_failed(mutation.command, args.duckdb)
             else:
                 reddened, output = sql_test_failed(mutation.expect_red, args.duckdb)
-        except RanNothing as ran_nothing:
+        except (RanNothing, TookTooLong) as broken:
             restore(mutation)
-            print(f"BROKEN   {mutation.name}: {ran_nothing}", file=sys.stderr)
+            print(f"BROKEN   {mutation.name}: {broken}", file=sys.stderr)
             return 2
         finally:
             restore(mutation)
 
         verdict = "KILLED " if reddened else "SURVIVED"
-        print(f"{verdict}  {mutation.name}  ->  {mutation.expect_red}")
+        target = mutation.expect_red or " ".join(mutation.command)
+        print(f"{verdict}  {mutation.name}  ->  {target}")
         if args.verbose or not reddened:
             print(output)
         if not reddened:
