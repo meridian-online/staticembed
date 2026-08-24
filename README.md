@@ -54,9 +54,11 @@ SELECT embed(coalesce(description, '')) FROM corpus;
 
 ### A long text is truncated before the mean, and nothing about the vector says so
 
-`embed` builds its vector from at most **512 tokens** of `text` — roughly the first few hundred words of ordinary English. Anything past that is dropped before the mean is taken, not down-weighted, and the vector that comes back is full width and unit norm either way. Two rows whose descriptions agree for the first 512 tokens and then diverge completely embed to the same place, and nothing about the result tells you that happened.
+`embed` builds its vector from at most **512 tokens** of `text` — roughly the first few hundred words of ordinary English for most prose. Anything past that is dropped before the mean is taken, not down-weighted, and the vector that comes back is full width and unit norm either way. Two rows whose descriptions agree up to the cut and then diverge completely embed to the same place, and nothing about the result tells you that happened.
 
-`embed_is_truncated(text)` is how you find out before you trust a result — a plain question, not a token count, so you never have to know the limit is 512 to ask it:
+That 512-token figure is not the whole story for every kind of text. For text made of unusually long, dense tokens — URLs, camelCase or snake_case identifiers, run-together compound words, anything with few word breaks — the cut can land much earlier, over as few as a couple of thousand characters, well before 512 tokens are even reached. You do not need to reason about which case you are in: `embed_is_truncated` answers the question either way, which is the point of asking it instead of counting.
+
+`embed_is_truncated(text)` is how you find out before you trust a result — a plain question, not a token count, so you never have to know the limit is 512, or where else it might bite, to ask it:
 
 ```sql
 SELECT count(*) FROM corpus WHERE embed_is_truncated(description);

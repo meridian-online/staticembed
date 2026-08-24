@@ -5,7 +5,7 @@
 //! | function | returns | why it exists |
 //! |---|---|---|
 //! | `embed(text VARCHAR)` | `FLOAT[]` | the product: one row in, one vector out |
-//! | `embed_is_truncated(text VARCHAR)` | `BOOLEAN` | whether `embed(text)` had to drop content past the token limit |
+//! | `embed_is_truncated(text VARCHAR)` | `BOOLEAN` | whether `embed(text)` had to drop content to fit |
 //! | `staticembed_version()` | `VARCHAR` | which build, which model, which width |
 //! | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | makes "did it re-embed?" answerable in SQL |
 //! | `staticembed_cache_clear()` | `BIGINT` | vectors dropped; lets a session start from a known state |
@@ -35,9 +35,11 @@
 //! `embed` builds its vector from at most 512 tokens of `text`; anything past
 //! that is discarded before the mean, and the vector that comes back is full
 //! width and unit norm either way, so a truncated result looks exactly like a
-//! complete one. `embed_is_truncated(text)` answers "did this happen" directly,
-//! without asking the caller to know the limit is 512: `embed_is_truncated(NULL)`
-//! is `NULL`, matching `embed(NULL)`.
+//! complete one. For text made of unusually long, dense tokens — URLs,
+//! run-together identifiers, compound words — the cut can land well before 512
+//! tokens are reached. `embed_is_truncated(text)` answers "did this happen"
+//! directly, without asking the caller to know the limit is 512, or where else
+//! it might bite: `embed_is_truncated(NULL)` is `NULL`, matching `embed(NULL)`.
 
 use std::error::Error;
 use std::ffi::CString;
@@ -184,11 +186,10 @@ impl VScalar for Embed {
 
 /// `embed_is_truncated(text VARCHAR) → BOOLEAN`
 ///
-/// True if `embed(text)` had to drop content: `text` tokenises to more ids than
-/// the model accepts, so the excess never reaches the mean and the vector
-/// `embed` returns does not reflect all of `text` — even though it is full
-/// width and unit norm like any other. See the module docs' *Truncation*
-/// section for the limit and what a caller does with this.
+/// True if `embed(text)` had to drop content, so the vector it returns does
+/// not reflect all of `text` — even though it is full width and unit norm like
+/// any other. See the module docs' *Truncation* section for the limit and what
+/// a caller does with this.
 struct IsTruncated;
 
 impl VScalar for IsTruncated {

@@ -31,16 +31,15 @@ const TOKENIZER: &[u8] = include_bytes!("../../../models/potion-base-8M/tokenize
 const CONFIG: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json");
 
 /// The token cap [`Model::embed`] truncates to before pooling: text that
-/// tokenises (after the encoder's own char-level pre-truncation and
-/// out-of-vocabulary filter) to more ids than this is truncated, and the
-/// excess never reaches the mean.
+/// tokenises to more in-vocabulary ids than this has the excess dropped
+/// before the mean, and — because the cut this crate performs also mirrors
+/// the character-level pre-cut `model2vec_rs::StaticModel::encode` applies
+/// ahead of tokenising — text made of long, sparse tokens can lose content
+/// well before it reaches 512 of them. See [`Truncation`] for the mechanism
+/// and [`Model::is_truncated`] for how a caller finds out.
 ///
-/// This is `model2vec_rs::StaticModel::encode`'s own default, `Some(512)` —
-/// declared here, and passed explicitly by [`Model::embed`], rather than left
-/// as the literal inside that call, so this crate has exactly one place that
-/// says "512" instead of two that are expected to agree. [`Model::is_truncated`]
-/// is the other reader of this constant; a test pins that the two stay in
-/// step at the boundary.
+/// This is `model2vec_rs::StaticModel::encode`'s own default, `Some(512)`,
+/// declared here so this crate has exactly one place that says "512".
 pub const MAX_TOKENS: usize = 512;
 
 /// Domain tag mixed into the model key so the digest cannot be confused with a
@@ -71,42 +70,54 @@ pub struct Model {
     inner: StaticModel,
     dim: usize,
     key: [u8; 32],
-    truncation: TruncationProbe,
+    truncation: Truncation,
 }
 
-/// A second, independent reader of the bundled tokenizer, used only to answer
-/// "would `embed` truncate this text" without paying for a full encode.
+/// The one place this crate decides how much of a text `embed` will use.
 ///
-/// `model2vec_rs::StaticModel` parses its own tokenizer at load and keeps it
-/// private, with no accessor — so answering this question needs a tokenizer of
-/// its own. It is loaded from the identical `TOKENIZER` bytes [`Model`] itself
-/// loads from, so the two agree on what a token is.
+/// `model2vec_rs::StaticModel::encode_with_args` performs two cuts when asked
+/// for at most `max_tokens` ids: first a **character**-level pre-cut of the
+/// raw string, to `max_tokens * median_token_length` characters — a
+/// performance guard, so an arbitrarily long text is not tokenised in full
+/// just to have the result thrown away — and only then a **token**-level cut
+/// of the tokenised, out-of-vocabulary-filtered result, to `max_tokens` ids.
+/// Both steps are private with no accessor, and an earlier version of this
+/// type reimplemented them separately from what decided `is_truncated`: two
+/// copies of the same arithmetic, expected to stay in step, with nothing
+/// forcing them to. One of those copies missed the character cut entirely,
+/// and a fix that recomputed it independently coincided with the token cap on
+/// a text built of one token repeated, reporting "not clipped" no matter how
+/// long the text ran.
 ///
-/// This deliberately does **not** reproduce `encode_with_args`'s char-level
-/// pre-truncation (to `max_tokens * median_token_length` characters, a private
-/// optimisation with no public accessor for the length it uses). A first
-/// version did, recomputing its own copy of that median from the vocabulary —
-/// and for a text built of one token repeated, where the per-token character
-/// count lands exactly on that median, the two truncations coincide: the
-/// probe's own pre-cut already lands on exactly [`MAX_TOKENS`] ids, so the
-/// over-the-limit count it goes on to check can never exceed the limit it is
-/// checking against, and the probe reports "not clipped" for text of any
-/// length. Tokenising the whole string and counting is slower for a
-/// pathologically long text, but it cannot mask itself this way, and the
-/// evidence behind this card found no text where the character cap fires
-/// before the token cap does.
-struct TruncationProbe {
+/// So this type does not answer a question about `embed`; it **performs the
+/// truncation `embed` uses**. [`Model::embed`] calls [`Truncation::surviving_prefix`]
+/// to get the exact text it will tokenise, and re-tokenises that with no
+/// further limit — the character and token cuts both already applied.
+/// [`Model::is_truncated`] asks the same method the same question and compares
+/// lengths. There is one implementation of "how much of this text survives",
+/// and both callers read it; neither can drift from what the other sees,
+/// because they are the same call.
+///
+/// It carries its own [`Tokenizer`], loaded from the identical `TOKENIZER`
+/// bytes [`Model`] itself loads from, because `model2vec_rs::StaticModel`
+/// keeps its tokenizer private with no accessor.
+struct Truncation {
     tokenizer: Tokenizer,
     /// The id `model2vec_rs` drops from a token list before truncating and
     /// pooling it. Recomputed here the same way its own (private) metadata
     /// step does: there is no accessor for it either.
     unk_token_id: Option<usize>,
+    /// The median byte length of a vocabulary token, used to reproduce
+    /// `model2vec_rs`'s private character-level pre-cut. Computed the same
+    /// way its own (private) `compute_metadata` does: byte lengths of every
+    /// vocabulary token, sorted, middle element.
+    median_token_length: usize,
 }
 
-impl TruncationProbe {
+impl Truncation {
     fn from_tokenizer_bytes(bytes: &[u8]) -> Result<Self, String> {
         let tokenizer = Tokenizer::from_bytes(bytes)
-            .map_err(|e| format!("the truncation probe's tokenizer did not load: {e}"))?;
+            .map_err(|e| format!("the truncation tokenizer did not load: {e}"))?;
 
         // No accessor exists for the unk token either, so recover it the way
         // `model2vec_rs`'s private `compute_metadata` does: round-trip the
@@ -120,38 +131,91 @@ impl TruncationProbe {
             .and_then(|token| tokenizer.token_to_id(token))
             .map(|id| id as usize);
 
+        let mut lens: Vec<usize> = tokenizer.get_vocab(false).keys().map(String::len).collect();
+        lens.sort_unstable();
+        let median_token_length = lens.get(lens.len() / 2).copied().unwrap_or(1);
+
         Ok(Self {
             tokenizer,
             unk_token_id,
+            median_token_length,
         })
     }
 
-    /// True if embedding `text` drops tokens: applying the same
-    /// out-of-vocabulary filter `encode_with_args` applies to the whole string
-    /// leaves more than [`MAX_TOKENS`] ids, so the real call truncates the list
-    /// before pooling.
+    /// Reproduce `model2vec_rs`'s private character-level pre-cut: at most
+    /// `max_tokens * median_token_length` characters of `text`, on a char
+    /// boundary.
+    fn char_truncate(text: &str, max_tokens: usize, median_token_length: usize) -> &str {
+        text.char_indices()
+            .nth(max_tokens.saturating_mul(median_token_length))
+            .map_or(text, |(byte_idx, _)| &text[..byte_idx])
+    }
+
+    /// The exact prefix of `text` that survives both of `model2vec_rs`'s
+    /// truncation steps — the substring [`Model::embed`] actually tokenises.
+    ///
+    /// Applies the character cut, tokenises what remains, drops
+    /// out-of-vocabulary ids the way `encode_with_args` does, and — if more
+    /// than `max_tokens` ids are still left — cuts back to the byte offset
+    /// where the `max_tokens`-th surviving id ends. `Encoding::get_offsets`
+    /// reports that offset in the *original* (pre-normalisation) string, which
+    /// is what makes slicing `text` at it, rather than the encoder's internal
+    /// token buffer, exact.
+    ///
+    /// This calls [`Tokenizer::encode`], not `encode_fast`: `encode_fast`
+    /// documents that it "does not compute offsets", and returns `(0, 0)` for
+    /// every one — a first version of this method used it and sliced every
+    /// over-cap text down to an empty string, which `embed` then reported as
+    /// the zero vector. `model2vec_rs`'s own pooling path uses the fast,
+    /// offset-free encode (it only ever needs ids), so this is the one place
+    /// in this crate that pays for the slower call, and only because this is
+    /// the one place that needs where a token sits in the original string.
+    fn surviving_prefix<'a>(&self, text: &'a str, max_tokens: usize) -> &'a str {
+        let char_cut = Self::char_truncate(text, max_tokens, self.median_token_length);
+        let Ok(encoding) = self.tokenizer.encode(char_cut, false) else {
+            // A failure here fails inside `embed` too, when it re-tokenises
+            // this same text — this degrades rather than panics because it
+            // also backs the `is_truncated` predicate, which has no fallible
+            // path to report through.
+            return char_cut;
+        };
+
+        let ids = encoding.get_ids();
+        let offsets = encoding.get_offsets();
+        let surviving: Vec<usize> = ids
+            .iter()
+            .enumerate()
+            .filter(|&(_, &id)| self.unk_token_id.is_none_or(|unk| id as usize != unk))
+            .map(|(i, _)| i)
+            // One more than the cap is all that's needed to know the cap was
+            // reached; collecting further would count ids the pooled mean
+            // never sees anyway.
+            .take(max_tokens + 1)
+            .collect();
+
+        if surviving.len() <= max_tokens {
+            // `token_ids.truncate(max_tok)` is a no-op here: nothing past the
+            // last kept id is dropped, so the char cut was the only cut, if
+            // any. Trailing text that produced no surviving id — whitespace, a
+            // trailing run of out-of-vocabulary symbols — is not content that
+            // was dropped: it would never have reached the mean regardless.
+            return char_cut;
+        }
+
+        // More than `max_tokens` ids survived the filter, so `encode_with_args`
+        // truncates the list to the first `max_tokens` of them before pooling.
+        // Cut the text back to where that last kept id ends.
+        &char_cut[..offsets[surviving[max_tokens - 1]].1]
+    }
+
+    /// True if [`Model::embed`] discards part of `text`: the prefix that
+    /// survives both truncation steps is shorter than `text` itself.
     ///
     /// A `false` for text with no in-vocabulary tokens at all — the empty
     /// string, whitespace, symbols outside the vocabulary — is correct, not a
     /// false negative: nothing was discarded, there was simply nothing there.
-    fn truncates(&self, text: &str) -> bool {
-        let Ok(encoding) = self.tokenizer.encode_fast(text, false) else {
-            // A failure here would also fail inside `embed`, which surfaces it
-            // as an ordinary error. This probe backs a SQL predicate rather
-            // than a fallible call, so it degrades to "not observed to
-            // truncate" instead of erroring a scan.
-            return false;
-        };
-
-        let count = match self.unk_token_id {
-            Some(unk) => encoding
-                .get_ids()
-                .iter()
-                .filter(|&&id| id as usize != unk)
-                .count(),
-            None => encoding.get_ids().len(),
-        };
-        count > MAX_TOKENS
+    fn truncates(&self, text: &str, max_tokens: usize) -> bool {
+        self.surviving_prefix(text, max_tokens).len() < text.len()
     }
 }
 
@@ -184,7 +248,7 @@ impl Model {
         }
 
         let key = model_key(TOKENIZER, WEIGHTS, CONFIG);
-        let truncation = TruncationProbe::from_tokenizer_bytes(TOKENIZER)?;
+        let truncation = Truncation::from_tokenizer_bytes(TOKENIZER)?;
 
         Ok(Model {
             inner,
@@ -235,25 +299,31 @@ impl Model {
     /// that fails is recoverable, and a column of zero vectors that looks like
     /// data is not.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        let sentence = [text.to_string()];
+        // `Truncation::surviving_prefix` has already applied both of
+        // `model2vec_rs`'s cuts (character, then token), so `encode_with_args`
+        // is called with `None` here rather than `Some(MAX_TOKENS)` — a second
+        // limit would either be redundant or, worse, a second place this crate
+        // could disagree with itself about how much of `text` it used.
+        let used = self.truncation.surviving_prefix(text, MAX_TOKENS);
+        let sentence = [used.to_string()];
         let vector = self
             .inner
-            .encode_with_args(&sentence, Some(MAX_TOKENS), 1)
+            .encode_with_args(&sentence, None, 1)
             .into_iter()
             .next()
             .unwrap_or_default();
         conform(vector, self.dim)
     }
 
-    /// Whether embedding `text` discards content: `text` tokenises to more
-    /// than [`MAX_TOKENS`] ids, so [`Model::embed`] truncates the excess before
-    /// pooling and the vector it returns does not reflect all of `text`.
+    /// Whether embedding `text` discards content: the prefix [`Model::embed`]
+    /// actually tokenises is shorter than `text`, so the excess never reached
+    /// the mean.
     ///
     /// The vector `embed` returns is full width and unit norm whether or not
     /// this is true — nothing about it says content was dropped, which is the
     /// whole reason to ask first.
     pub fn is_truncated(&self, text: &str) -> bool {
-        self.truncation.truncates(text)
+        self.truncation.truncates(text, MAX_TOKENS)
     }
 }
 
@@ -398,8 +468,8 @@ mod tests {
         }
     }
 
-    /// AC3 + AC5: the boundary between "clipped" and "not", pinned in both
-    /// directions with a probe built to actually show truncation.
+    /// AC3 + AC5: the *token* boundary between "clipped" and "not", pinned in
+    /// both directions with a probe built to actually show truncation.
     ///
     /// A text of one repeated token cannot show this: the mean of 512 copies of
     /// a vector equals the mean of 513 copies of the same vector, so a probe
@@ -408,18 +478,37 @@ mod tests {
     /// probe is `N` copies of one filler word plus one DISTINCT trailing marker
     /// word, so whether the marker reached the mean is a fact a byte-equality
     /// check on the two vectors can actually observe.
+    ///
+    /// The filler is `"ok "` — three characters per token — rather than a
+    /// six-character word, on purpose: `MAX_TOKENS * median_token_length`
+    /// characters (512 * 6 = 3072 here) is a *second*, independent boundary,
+    /// and a filler word whose own characters-per-token happens to sit at the
+    /// vocabulary median crosses it at almost the same repetition count as the
+    /// token cap. An earlier version of this test used `"steel "` — six
+    /// characters including the space, exactly the median — and 511 reps plus
+    /// a nine-character marker landed at 3075 characters, three past the
+    /// 3072-character cut. That test asserted "not clipped" for text that the
+    /// character cut had already clipped, and passed, because nothing before
+    /// this file's `Truncation` type checked the character cut at all. `"ok "`
+    /// keeps this probe's total character count under 1600 at these
+    /// repetition counts — nowhere near 3072 — so it is pinning the token
+    /// boundary alone, uncontaminated by the other one.
+    /// [`text_is_reported_clipped_by_the_character_cut_alone`] pins that other
+    /// boundary the same way.
     #[test]
     fn a_long_text_is_reported_clipped_exactly_where_the_marker_stops_reaching_the_mean() {
         let model = bundled().expect("the bundled model loads");
-        let filler = |tokens: usize| "steel ".repeat(tokens).trim_end().to_string();
+        let filler = |tokens: usize| "ok ".repeat(tokens).trim_end().to_string();
         let filler_plus_marker = |tokens: usize| {
-            let mut text = "steel ".repeat(tokens);
-            text.push_str("logistics");
+            let mut text = "ok ".repeat(tokens);
+            text.push_str("marker");
             text
         };
 
         // 511 filler tokens + 1 marker = 512 tokens: exactly at the cap, so the
-        // marker is the 512nd token and is still pooled.
+        // marker is the 512nd token and is still pooled. 1539 characters total
+        // — far short of the 3072-character cut, so only the token cap is in
+        // play here.
         let at_cap = filler_plus_marker(MAX_TOKENS - 1);
         assert!(
             !model.is_truncated(&at_cap),
@@ -433,7 +522,8 @@ mod tests {
         );
 
         // 512 filler tokens + 1 marker = 513 tokens: one past the cap, so the
-        // marker is truncated away before pooling.
+        // marker is truncated away before pooling. 1542 characters — still far
+        // short of 3072.
         let past_cap = filler_plus_marker(MAX_TOKENS);
         assert!(
             model.is_truncated(&past_cap),
@@ -445,6 +535,66 @@ mod tests {
             model.embed(&filler(MAX_TOKENS)).expect("embed"),
             "the marker at position {} must have been dropped before pooling",
             MAX_TOKENS + 1
+        );
+    }
+
+    /// AC1 + AC3 + AC5: the *character* boundary between "clipped" and "not" —
+    /// the one `embed_is_truncated` used to be structurally blind to.
+    ///
+    /// `model2vec_rs` cuts the raw string to `MAX_TOKENS * median_token_length`
+    /// characters (3072, here) *before* tokenising, so text whose own
+    /// characters-per-token sits above that median can lose content while
+    /// still tokenising to far fewer than [`MAX_TOKENS`] ids — a token-count
+    /// check alone, run on the untruncated text, would say "plenty of room"
+    /// right up to the point content is already gone. `"internationalization "`
+    /// is 21 characters for 2 tokens — 10.5 characters per token, well above
+    /// the median of 6 — so it crosses the 3072-character cut at 147
+    /// repetitions (3087 characters) while sitting at only 294 tokens, 218
+    /// short of the token cap.
+    #[test]
+    fn text_is_reported_clipped_by_the_character_cut_alone() {
+        let model = bundled().expect("the bundled model loads");
+        let word = "internationalization ";
+        let filler = |reps: usize| word.repeat(reps).trim_end().to_string();
+        let filler_plus_marker = |reps: usize| {
+            let mut text = word.repeat(reps);
+            text.push_str("marker");
+            text
+        };
+
+        // 145 reps of filler plus the marker is 3051 characters, well under
+        // the 3072-character cut, and 291 tokens, well under MAX_TOKENS —
+        // neither cap is in play, so the marker is pooled.
+        let under_the_cut = filler_plus_marker(145);
+        assert!(
+            !model.is_truncated(&under_the_cut),
+            "3051 characters, 291 tokens: must not report clipped"
+        );
+        assert_ne!(
+            model.embed(&under_the_cut).expect("embed"),
+            model.embed(&filler(145)).expect("embed"),
+            "the marker must still move the mean"
+        );
+
+        // 147 reps of filler alone is already 3087 characters — past the
+        // 3072-character cut — at only 294 tokens, 218 short of MAX_TOKENS.
+        // The trailing marker sits entirely past the character cut, so it is
+        // discarded before it is ever tokenised, and embedding it changes
+        // nothing: the vector is identical to the filler alone.
+        let over_the_cut = filler_plus_marker(147);
+        assert!(
+            model.is_truncated(&over_the_cut),
+            "3093 characters, 295 tokens: must report clipped even though \
+             token count alone is nowhere near {MAX_TOKENS}"
+        );
+        assert!(
+            model.is_truncated(&filler(147)),
+            "the filler alone, past the character cut, must also report clipped"
+        );
+        assert_eq!(
+            model.embed(&over_the_cut).expect("embed"),
+            model.embed(&filler(147)).expect("embed"),
+            "the marker past the character cut must have been dropped before pooling"
         );
     }
 
@@ -461,20 +611,40 @@ mod tests {
         // wrong cap on one side would still pass. This text has a token that
         // is inside one cap and outside the other — a marker as the 512th
         // token — so a one-token disagreement between the two call paths is
-        // something this comparison can actually see.
+        // something this comparison can actually see. It also happens to sit
+        // 3 characters past the 3072-character cut, so it exercises the
+        // character-cut path as well as the token-cut path.
         let mut boundary_marker = "steel ".repeat(MAX_TOKENS - 1);
         boundary_marker.push_str("logistics");
+
+        // The reachable class the round's defect was found in: text whose
+        // characters-per-token sits above the vocabulary median, so the
+        // character cut fires while the token count is still far under
+        // MAX_TOKENS. `model.inner.encode_single` runs the unmodified upstream
+        // path — both cuts, on the original call shape — so equality here is
+        // the proof that reading `Truncation::surviving_prefix` back through a
+        // fresh `encode_with_args(None)` reproduces it exactly, not just for
+        // the cases this crate's own truncation logic was designed against.
+        let dense_word = "internationalization ";
+        let just_under_the_char_cut = dense_word.repeat(146);
+        let just_over_the_char_cut = dense_word.repeat(147);
+        let far_over_the_char_cut = dense_word.repeat(300);
 
         for text in [
             "",
             "a foundry casting valve bodies",
             &"steel ".repeat(600),
             boundary_marker.as_str(),
+            just_under_the_char_cut.as_str(),
+            just_over_the_char_cut.as_str(),
+            far_over_the_char_cut.as_str(),
         ] {
             assert_eq!(
                 model.embed(text).expect("embed"),
                 conform(model.inner.encode_single(text), model.dim()).expect("conform"),
-                "{text:?}"
+                "{} chars, {:?} preview",
+                text.chars().count(),
+                &text[..text.len().min(40)]
             );
         }
     }

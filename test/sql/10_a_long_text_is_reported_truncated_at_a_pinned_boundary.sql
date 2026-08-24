@@ -1,6 +1,8 @@
 -- AC1, AC3, AC4, AC5: `embed_is_truncated` is a SQL-level predicate an analyst
 -- can put in a WHERE clause and a count(*), the boundary it reports is pinned
--- in both directions, and `embed`'s own contract is unchanged by its presence.
+-- in both directions on BOTH of the limits `embed` applies — a token count and
+-- a character count ahead of it — and `embed`'s own contract is unchanged by
+-- its presence.
 --
 -- AC5's failure mode, spelled out: a probe of one token repeated cannot show
 -- truncation, because the mean of 512 copies of a vector equals the mean of
@@ -25,14 +27,25 @@ SELECT must('whitespace only is not reported truncated',
 SELECT must('ordinary short text is not reported truncated',
     embed_is_truncated('a manufacturer of industrial fasteners in Sheffield') = false);
 
--- The pinned boundary. `repeat('steel ', n)` gives `n` filler tokens (measured:
--- one word, one token, in this vocabulary); `logistics` is one DISTINCT token
+-- The pinned boundary. `repeat('ok ', n)` gives `n` filler tokens (measured:
+-- one word, one token, in this vocabulary); `marker` is one DISTINCT token
 -- appended directly after, with no boundary token count ambiguity.
+--
+-- `ok ` rather than `steel `: `embed` truncates on TWO independent limits, a
+-- token count and a character count, and `steel ` is six characters — the
+-- exact median token length in this vocabulary, which is also what the
+-- character limit is measured in units of. 511 reps of `steel ` plus a
+-- nine-character marker lands three characters past that second limit, so a
+-- boundary built from it is pinning the character cut, not the token cut, and
+-- an earlier version of this file asserted "not truncated" for text the
+-- character cut had already clipped. `ok ` is three characters per token, so
+-- even 512 reps plus the marker stays under 1600 characters — nowhere near
+-- the character limit — and this table pins the token boundary alone.
 CREATE TABLE boundary AS SELECT * FROM (VALUES
     -- 511 filler + 1 marker = 512 tokens: exactly at the cap.
-    (511, repeat('steel ', 511) || 'logistics', rtrim(repeat('steel ', 511))),
+    (511, repeat('ok ', 511) || 'marker', rtrim(repeat('ok ', 511))),
     -- 512 filler + 1 marker = 513 tokens: one past the cap.
-    (512, repeat('steel ', 512) || 'logistics', rtrim(repeat('steel ', 512)))
+    (512, repeat('ok ', 512) || 'marker', rtrim(repeat('ok ', 512)))
 ) AS t(filler_tokens, with_marker, filler_only);
 
 SELECT must('512 tokens (511 filler + marker) is not reported truncated',
@@ -48,6 +61,37 @@ SELECT must('at 513 tokens the marker was dropped before pooling',
     (SELECT embed(with_marker) FROM boundary WHERE filler_tokens = 512)
     IS NOT DISTINCT FROM
     (SELECT embed(filler_only) FROM boundary WHERE filler_tokens = 512));
+
+-- AC1 + AC3: the *character* boundary, pinned the same way — the direction
+-- `embed_is_truncated` used to be structurally blind to. `embed` cuts the raw
+-- string to 3072 characters before it ever tokenises, so text whose own
+-- characters-per-token sits above this vocabulary's median (6) can lose
+-- content while its full, untruncated token count is nowhere near 512.
+-- `internationalization ` is 21 characters for 2 tokens — crosses the
+-- 3072-character cut at 147 reps (3087 characters) while sitting at only 294
+-- tokens.
+CREATE TABLE char_boundary AS SELECT * FROM (VALUES
+    -- 146 reps = 3066 characters: under the character cut, and only 292
+    -- tokens — nowhere near the token cap either.
+    (146, repeat('internationalization ', 146) || 'marker', rtrim(repeat('internationalization ', 146))),
+    -- 147 reps = 3087 characters: past the character cut, at 294 tokens —
+    -- still 218 short of the token cap.
+    (147, repeat('internationalization ', 147) || 'marker', rtrim(repeat('internationalization ', 147)))
+) AS t(filler_reps, with_marker, filler_only);
+
+SELECT must('under the character cut, with far fewer than 512 tokens, is not reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM char_boundary WHERE filler_reps = 146) = false);
+SELECT must('under the character cut the marker still reaches the mean',
+    (SELECT embed(with_marker) FROM char_boundary WHERE filler_reps = 146)
+    IS DISTINCT FROM
+    (SELECT embed(filler_only) FROM char_boundary WHERE filler_reps = 146));
+
+SELECT must('past the character cut, still far fewer than 512 tokens, is reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM char_boundary WHERE filler_reps = 147) = true);
+SELECT must('past the character cut the marker was dropped before pooling, though token count alone gave no warning',
+    (SELECT embed(with_marker) FROM char_boundary WHERE filler_reps = 147)
+    IS NOT DISTINCT FROM
+    (SELECT embed(filler_only) FROM char_boundary WHERE filler_reps = 147));
 
 -- AC1: a WHERE clause and a count(*) over a column, the way an analyst would
 -- actually ask the question.
