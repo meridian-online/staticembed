@@ -455,7 +455,22 @@ mod tests {
     #[test]
     fn embed_matches_the_upstream_convenience_wrapper_it_replaced() {
         let model = bundled().expect("the bundled model loads");
-        for text in ["", "a foundry casting valve bodies", &"steel ".repeat(600)] {
+
+        // A text made of one token repeated cannot exercise this: the mean of
+        // 511 copies of a vector equals the mean of 512 copies of it, so a
+        // wrong cap on one side would still pass. This text has a token that
+        // is inside one cap and outside the other — a marker as the 512th
+        // token — so a one-token disagreement between the two call paths is
+        // something this comparison can actually see.
+        let mut boundary_marker = "steel ".repeat(MAX_TOKENS - 1);
+        boundary_marker.push_str("logistics");
+
+        for text in [
+            "",
+            "a foundry casting valve bodies",
+            &"steel ".repeat(600),
+            boundary_marker.as_str(),
+        ] {
             assert_eq!(
                 model.embed(text).expect("embed"),
                 conform(model.inner.encode_single(text), model.dim()).expect("conform"),
