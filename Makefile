@@ -31,12 +31,12 @@ DUCKDB_PLATFORM ?= $(if $(CLI_PLATFORM),$(CLI_PLATFORM),$(UNAME_PLATFORM))
 BUILD_DIR := build
 EXTENSION := $(BUILD_DIR)/$(EXTENSION_NAME).duckdb_extension
 
-.PHONY: all check build extension test test-sql no-network mutation-check fmt clippy clean
+.PHONY: all check build extension test test-sql no-network documented-surface mutation-check fmt clippy clean
 
 all: extension
 
 ## Everything CI runs, in the order it runs it.
-check: fmt clippy test extension no-network test-sql
+check: fmt clippy test extension no-network documented-surface test-sql
 
 build:
 	cargo build --workspace --release
@@ -62,6 +62,13 @@ test:
 no-network: extension
 	python3 scripts/check_no_network_deps.py --self-test
 	python3 scripts/check_no_network_deps.py --artifact $(EXTENSION)
+
+## The function table and STRUCT signatures written in README.md and the
+## module doc, against duckdb_functions() of a loaded build. Three copies of one
+## signature is three chances to be wrong, and the page was wrong.
+documented-surface: extension
+	python3 scripts/check_documented_surface.py --self-test
+	python3 scripts/check_documented_surface.py --extension $(EXTENSION) --duckdb $(DUCKDB)
 
 ## SQL tests: LOAD the packaged artifact into a real DuckDB and query it.
 ## Needs the duckdb CLI on PATH.

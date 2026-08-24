@@ -12,26 +12,26 @@
 
 SET threads TO 1;
 
-CREATE TABLE big AS SELECT 'row number ' || i AS s FROM range(50000) r(i);
+CREATE TABLE big AS SELECT 'row number ' || i AS s FROM range(40000) r(i);
 
 SELECT staticembed_cache_clear();
 
 CREATE TABLE big_pass_1 AS SELECT embed(s) AS v FROM big;
 CREATE TABLE first_pass AS SELECT staticembed_cache_stats() AS s;
 
-SELECT must('fifty thousand distinct values embed fifty thousand times',
-    (SELECT s.encoded FROM first_pass) = 50000);
-SELECT must('fifty thousand distinct values all fit the cache',
+SELECT must('forty thousand distinct values embed forty thousand times',
+    (SELECT s.encoded FROM first_pass) = 40000);
+SELECT must('forty thousand distinct values all fit the cache',
     (SELECT s.uncached FROM first_pass) = 0
-    AND (SELECT s.entries FROM first_pass) = 50000);
+    AND (SELECT s.entries FROM first_pass) = 40000);
 
 CREATE TABLE big_pass_2 AS SELECT embed(s) AS v FROM big;
 CREATE TABLE second_pass AS SELECT staticembed_cache_stats() AS s;
 
-SELECT must('a repeated query over fifty thousand distinct values re-embeds none of them',
+SELECT must('a repeated query over forty thousand distinct values re-embeds none of them',
     (SELECT s.encoded FROM second_pass) = (SELECT s.encoded FROM first_pass));
 SELECT must('the second pass was served entirely from the cache',
-    (SELECT s.hits FROM second_pass) - (SELECT s.hits FROM first_pass) = 50000);
+    (SELECT s.hits FROM second_pass) - (SELECT s.hits FROM first_pass) = 40000);
 
 -- Past the capacity there must be no cliff: a rescan is served for a full cache
 -- worth, not for none of it. The previous build gave 0 hits here; an LRU or a

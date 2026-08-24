@@ -34,6 +34,16 @@ SELECT must('embed returns a vector for a string value',
 SELECT must('the vector is the width the extension reports',
     len(embed('a maker of industrial fasteners')) = (SELECT n FROM width));
 
+-- And the width itself, absolutely. Every other width assertion in this suite
+-- compares the vector against `staticembed_version()`, which reads the same
+-- `Model::dim` the vector came from — so a build whose encoder returned five
+-- floats for everything would report `dim 5` and satisfy all of them. 256 is
+-- the width the bundled potion-base-8M publishes, and the Rust test
+-- `the_encoder_width_matches_the_width_the_config_declares` holds the encoder
+-- to the model's own config.json.
+SELECT must('the bundled model returns 256 floats',
+    len(embed('a maker of industrial fasteners')) = 256);
+
 SELECT must('the vector carries signal rather than zeros',
     list_max(embed('a maker of industrial fasteners')) > 0);
 

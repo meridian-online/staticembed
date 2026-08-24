@@ -157,12 +157,31 @@ def runtime_tree() -> str:
     return completed.stdout
 
 
-def undefined_symbols(artifact: pathlib.Path) -> list[str] | None:
-    """The artifact's undefined symbols, one bare name per entry.
+def parse_nm_output(text: str) -> list[str]:
+    """Bare symbol names from `nm` output.
 
-    Leading underscores (Mach-O) and `@GLIBC_2.x` version suffixes (ELF) are
-    stripped, so a name in FORBIDDEN_SYMBOLS matches on either platform.
+    Leading underscores (Mach-O prefixes every C symbol with one) and
+    `@GLIBC_2.x` version suffixes (ELF) are stripped, so a name in
+    FORBIDDEN_SYMBOLS matches on either platform.
+
+    Split out from the `nm` call so that `--self-test` can drive it with real
+    `nm` output. The version of the self-test this replaces normalised its own
+    planted symbol and then matched that, which tested the assertion rather than
+    the parser: deleting the `.lstrip("_")` here left the self-test exiting 0
+    and still printing that it caught all 38 names, while the macOS check
+    cleared `/usr/bin/nc`.
     """
+    names = []
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        names.append(fields[-1].lstrip("_").split("@", 1)[0])
+    return names
+
+
+def undefined_symbols(artifact: pathlib.Path) -> list[str] | None:
+    """The artifact's undefined symbols, one bare name per entry."""
     if not shutil.which("nm"):
         return None
     for arguments in (["-u"], ["-D", "-u"], ["--dynamic", "--undefined-only"]):
@@ -174,13 +193,7 @@ def undefined_symbols(artifact: pathlib.Path) -> list[str] | None:
     else:
         raise SystemExit(f"nm reported no undefined symbols for {artifact}; that is not credible")
 
-    names = []
-    for line in completed.stdout.splitlines():
-        token = line.split()[-1] if line.split() else ""
-        if not token:
-            continue
-        names.append(token.lstrip("_").split("@", 1)[0])
-    return names
+    return parse_nm_output(completed.stdout)
 
 
 def offending_symbols(names: list[str]) -> set[str]:
@@ -238,39 +251,87 @@ def self_test() -> int:
         print("self-test FAILED: the library pattern matches libSystem", file=sys.stderr)
         return 1
 
-    # Every forbidden symbol, one at a time, in both platforms' spellings. A
-    # typo in one name would otherwise weaken the check silently and forever.
+    # Every forbidden symbol, one at a time, in both platforms' spellings, as
+    # lines of real `nm` output driven through the real parser. Planting a
+    # pre-normalised name here instead is what made the previous version of this
+    # unable to notice its own parser going blind.
     for symbol in FORBIDDEN_SYMBOLS:
-        for planted in (f"_{symbol}", symbol, f"{symbol}@GLIBC_2.2.5"):
-            names = [planted.lstrip("_").split("@", 1)[0]]
-            if offending_symbols(names) != {symbol}:
-                print(f"self-test FAILED: {planted!r} was not caught", file=sys.stderr)
+        planted = [
+            f"                 U _{symbol}",  # macOS `nm -u`
+            f"                 U {symbol}",  # ELF `nm -D -u`
+            f"                 U {symbol}@GLIBC_2.2.5",  # ELF, versioned
+            f"_{symbol}",  # macOS `nm -u`, bare-name form
+        ]
+        for line in planted:
+            caught = offending_symbols(parse_nm_output(line))
+            if caught != {symbol}:
+                print(
+                    f"self-test FAILED: {line!r} parsed to {sorted(caught)}, expected [{symbol!r}]",
+                    file=sys.stderr,
+                )
                 return 1
 
-    # The undefined symbols a clean build of this extension really has. Every
-    # one of these must pass, or the check would fail on its own artifact.
-    clean_symbols = [
-        "dyld_stub_binder",  # the dynamic linker; `bind` as a substring of it
-        "malloc",
-        "free",
-        "open",
-        "read",
-        "write",
-        "close",
-        "pthread_create",
-        "pthread_cond_wait",
-        "getentropy",
-        "sysconf",
-    ]
-    caught = offending_symbols(clean_symbols)
+    # Real `nm -u` output from a clean build of this extension. Every one of
+    # these must pass, or the check would fail on its own artifact.
+    clean_output = """\
+                 U dyld_stub_binder
+                 U _malloc
+                 U _free
+                 U _open
+                 U _read
+                 U _write
+                 U _close
+                 U _pthread_create
+                 U _pthread_cond_wait
+                 U _getentropy
+                 U _sysconf
+                 U _mmap
+                 U _sched_yield
+"""
+    caught = offending_symbols(parse_nm_output(clean_output))
     if caught:
         print(f"self-test FAILED: clean symbols matched {sorted(caught)}", file=sys.stderr)
         return 1
 
+    # And end to end, against a binary on this machine that really does open
+    # sockets. Synthetic input proves the parser; this proves the whole path
+    # from `nm` through to the verdict.
+    networking = next(
+        (
+            candidate
+            for candidate in (
+                pathlib.Path("/usr/bin/nc"),
+                pathlib.Path("/bin/nc"),
+                pathlib.Path("/usr/bin/ping"),
+                pathlib.Path("/bin/ping"),
+                pathlib.Path("/usr/bin/ssh"),
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    if networking is None:
+        print("self-test: SKIPPED the live check — no networking binary found to test against")
+    else:
+        live = undefined_symbols(networking)
+        if live is None:
+            print("self-test: SKIPPED the live check — nm is not available")
+        elif not offending_symbols(live):
+            print(
+                f"self-test FAILED: {networking} opens sockets and the check cleared it",
+                file=sys.stderr,
+            )
+            return 1
+        else:
+            print(
+                f"self-test ok: {networking} is correctly flagged "
+                f"({len(offending_symbols(live))} socket entry points found in it)"
+            )
+
     print(
         f"self-test ok: the matcher finds a planted TLS stack, catches all "
-        f"{len(FORBIDDEN_SYMBOLS)} socket entry points in both spellings, and "
-        f"clears a clean tree and a clean symbol table"
+        f"{len(FORBIDDEN_SYMBOLS)} socket entry points parsed from real nm output in "
+        f"both platforms' spellings, and clears a clean tree and a clean symbol table"
     )
     return 0
 

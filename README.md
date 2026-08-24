@@ -36,7 +36,7 @@ Four functions, and `embed` is the one you came for.
 |---|---|---|
 | `embed(text VARCHAR)` | `FLOAT[]` | the vector for one string |
 | `staticembed_version()` | `VARCHAR` | which build, which model, which vector width |
-| `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, entries, capacity)` | what the cache has been doing |
+| `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | what the cache has been doing |
 | `staticembed_cache_clear()` | `BIGINT` | drop the cached vectors; returns how many |
 
 There is no similarity or nearest-neighbour function, deliberately. See *What it is not* above.
@@ -70,7 +70,9 @@ CREATE TABLE w AS SELECT embed(description) FROM corpus;
 SELECT staticembed_cache_stats();   -- encoded unchanged, if uncached was 0
 ```
 
-**The bound.** The cache spends a fixed memory budget, so it holds `capacity` vectors and no more; `staticembed_cache_stats().capacity` reports the figure for your build, and it falls as the model's vector width rises. Once it is full it **stops admitting new values rather than evicting old ones**, and `uncached` counts every lookup it turned away.
+**The bound.** The cache spends a fixed memory budget — 64 MiB — so it holds `capacity` vectors and no more. Once it is full it **stops admitting new values rather than evicting old ones**, and `uncached` counts every lookup it turned away.
+
+`staticembed_cache_stats().capacity` is the only place to read the figure, and there is a reason it is not written down here: it depends on the model's vector width and on how your platform's allocator rounds. The extension measures the second of those at startup by allocating one block and asking, rather than assuming, so the same build lands on different capacities on macOS and Linux. A test fills the cache and asks the allocator how many bytes the process is holding, so the budget is a measurement rather than a promise about arithmetic.
 
 That choice is the whole behaviour above the bound, so it is worth being plain about. A column with more distinct values than `capacity` is served for `capacity` of them on a re-run and re-embeds the rest — a hit rate of `capacity / distinct`, holding steady as the column grows. Under any recency-ordered policy instead — LRU, FIFO, or the two generations this extension shipped with first — a repeated scan evicts every value exactly before it is next wanted and the hit rate is **zero**, which is a cliff rather than a slope and is much worse than it sounds.
 

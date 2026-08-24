@@ -50,36 +50,160 @@ const CACHE_KEY_DOMAIN: &[u8] = b"staticembed/cache-key/v1";
 
 /// Memory the cache may spend, in bytes.
 ///
-/// A budget rather than an entry count, because an entry's size is the model's
-/// vector width and a model swap would otherwise change the memory this holds
-/// without changing any number written down. 64 MiB is about 61,000 vectors at
-/// this model's width; [`capacity_for_budget`] is where that conversion lives
-/// and `the_default_budget_holds_at_least_fifty_thousand_vectors` is what stops
-/// the figure drifting.
+/// A ceiling, not an estimate: [`capacity_for_budget`] picks the largest number
+/// of vectors whose real cost stays under this, and
+/// `a_full_cache_costs_no_more_than_the_budget_promised` fills a cache and asks
+/// the allocator whether that held.
+///
+/// 64 MiB is modest beside DuckDB's own default, which is most of the machine.
+/// How many vectors it buys is not fixed and is not written down here: it
+/// depends on the model's width and on how the platform's allocator rounds, so
+/// `staticembed_cache_stats().capacity` is the only place to read it.
 pub const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
 /// A cache key: a 32-byte digest of the model identity and the input text.
 pub type CacheKey = [u8; 32];
 
-/// Bytes one cached vector costs, at a given model width.
+/// Bytes one bucket of the map costs: the key and the `Arc` inline, plus the
+/// one control byte `hashbrown` pairs with every bucket.
+const BUCKET_BYTES: usize = std::mem::size_of::<(CacheKey, Arc<[f32]>)>() + 1;
+
+/// Control bytes `hashbrown` allocates beyond one per bucket, so a SIMD group
+/// can be read past the end of the array without a bounds check. Sixteen on
+/// every target with SSE2 or NEON, which is every target this extension ships
+/// for.
 ///
-/// The key and the `Arc` pointer sit inline in the map's bucket array, which
-/// `HashMap` keeps under seven-eighths full and pairs with one control byte per
-/// bucket; the floats and the `Arc`'s two reference counts sit on the heap.
-/// This is an estimate of a real allocator's behaviour, not an exact figure —
-/// it is used to pick a capacity, so being close is what it needs to be.
-pub fn entry_bytes(dim: usize) -> usize {
-    const CONTROL_BYTE: usize = 1;
-    const ARC_COUNTS: usize = 2 * std::mem::size_of::<usize>();
-    let inline = std::mem::size_of::<CacheKey>() + std::mem::size_of::<Arc<[f32]>>() + CONTROL_BYTE;
-    // Seven-eighths load factor: eight buckets of storage buy seven entries.
-    let inline_with_slack = inline.div_ceil(7) * 8;
-    inline_with_slack + ARC_COUNTS + dim * std::mem::size_of::<f32>()
+/// Sixteen bytes on a three-megabyte array looks negligible and is not: it puts
+/// the request one byte over a page multiple, and a large allocation is rounded
+/// to whole pages. Leaving it out cost 16,384 bytes — the whole gap between the
+/// model and the measurement at 10,000 entries and above.
+const CONTROL_GROUP_BYTES: usize = 16;
+
+/// Buckets `HashMap` ends up with after `entries` inserts.
+///
+/// This mirrors `hashbrown::raw::capacity_to_buckets`: the array is a power of
+/// two, sized so that seven-eighths of it covers the entries. It is a mirror of
+/// a dependency and could drift, which is exactly what
+/// `a_full_cache_costs_no_more_than_the_budget_promised` is for — that test
+/// asks the allocator rather than asking this function.
+///
+/// The power of two is the part the first cost model left out. At 61,230
+/// entries it charged 56 bytes an entry for the map; the real array is 131,072
+/// buckets, which is 104.9 — measured, not derived from this function.
+pub fn buckets_for(entries: usize) -> usize {
+    if entries < 8 {
+        return if entries < 4 { 4 } else { 8 };
+    }
+    (entries * 8 / 7).next_power_of_two()
 }
 
-/// How many vectors of width `dim` fit in `budget_bytes`, never fewer than one.
+/// Bytes the allocator really hands out for a block of `requested` bytes.
+///
+/// **Probed, not modelled.** Allocators round a request up to a size class, and
+/// both blocks this cache holds are affected: on macOS the 1,040-byte block
+/// behind one vector comes back with 1,280, and a 3,211,264-byte bucket array
+/// comes back with 3,227,648. Modelling either would mean encoding one
+/// platform's size classes; asking costs one malloc and one free.
+///
+/// On a platform with no way to ask, this returns the requested size. That
+/// under-counts, so a cache there may exceed the budget by whatever the
+/// allocator rounds up — the one direction in which the ceiling is soft, and it
+/// is soft because the alternative is claiming to know something unmeasured.
+pub fn allocation_bytes(requested: usize) -> usize {
+    if requested == 0 {
+        return 0;
+    }
+    // 16 is what `hashbrown` aligns its bucket array to and what the system
+    // allocator returns anyway; both blocks go through plain `malloc` at this
+    // alignment on the platforms probed.
+    let Ok(layout) = std::alloc::Layout::from_size_align(requested, 16) else {
+        return requested;
+    };
+
+    // SAFETY: `layout` has a non-zero size, the pointer is checked before use,
+    // and it is freed with the layout it was allocated with.
+    unsafe {
+        let block = std::alloc::alloc(layout);
+        if block.is_null() {
+            return requested;
+        }
+        let measured = allocated_size(block);
+        std::alloc::dealloc(block, layout);
+        measured.max(requested)
+    }
+}
+
+/// Bytes one cached vector's heap block costs: an `Arc`'s two reference counts
+/// followed by the floats, as the allocator really sizes it.
+pub fn vector_bytes(dim: usize) -> usize {
+    allocation_bytes(2 * std::mem::size_of::<usize>() + dim * std::mem::size_of::<f32>())
+}
+
+/// Bytes the map's bucket array costs at `entries` entries, as the allocator
+/// really sizes it.
+pub fn bucket_array_bytes(entries: usize) -> usize {
+    allocation_bytes(buckets_for(entries) * BUCKET_BYTES + CONTROL_GROUP_BYTES)
+}
+
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn malloc_size(ptr: *const std::ffi::c_void) -> usize;
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn malloc_usable_size(ptr: *mut std::ffi::c_void) -> usize;
+}
+
+/// # Safety
+/// `block` must be a live allocation from the global allocator.
+unsafe fn allocated_size(block: *mut u8) -> usize {
+    #[cfg(target_os = "macos")]
+    {
+        malloc_size(block.cast::<std::ffi::c_void>())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        malloc_usable_size(block.cast::<std::ffi::c_void>())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = block;
+        0
+    }
+}
+
+/// Bytes a cache holding `entries` vectors of width `dim` costs.
+pub fn bytes_for(entries: usize, dim: usize) -> usize {
+    bucket_array_bytes(entries).saturating_add(entries.saturating_mul(vector_bytes(dim)))
+}
+
+/// The largest number of vectors of width `dim` whose cost stays inside
+/// `budget_bytes`, never fewer than one.
+///
+/// A search rather than a division, because [`bytes_for`] is a step function:
+/// the bucket array doubles rather than growing smoothly, so there is no
+/// per-entry constant to divide by. The old division by a per-entry constant is
+/// what let a wrong cost model pass a test that divided and multiplied by the
+/// same constant.
 pub fn capacity_for_budget(budget_bytes: usize, dim: usize) -> usize {
-    (budget_bytes / entry_bytes(dim)).max(1)
+    let per_vector = vector_bytes(dim);
+    if per_vector == 0 {
+        return 1;
+    }
+    // An upper bound: ignoring the map entirely cannot fit fewer vectors than
+    // including it, so the true answer is at or below this.
+    let mut high = (budget_bytes / per_vector).max(1);
+    let mut low = 1usize;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if bytes_for(middle, dim) <= budget_bytes {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
 }
 
 /// What the cache has been doing, as reported to SQL.
@@ -187,7 +311,10 @@ impl EmbeddingCache {
     /// went away.
     pub fn clear(&mut self) -> u64 {
         let dropped = self.entries.len() as u64;
-        self.entries.clear();
+        // Replaced rather than cleared: `HashMap::clear` keeps the bucket array,
+        // which at a full cache is megabytes. Someone calling
+        // `staticembed_cache_clear()` is asking for the memory back.
+        self.entries = HashMap::new();
         self.hits = 0;
         self.misses = 0;
         self.uncached = 0;
@@ -413,23 +540,56 @@ mod tests {
         );
     }
 
-    /// The capacity is the largest number of entries that fits the budget.
+    /// The capacity search returns the largest entry count the cost model
+    /// allows.
     ///
-    /// Stated as the exact property rather than as a ratio, so it holds at
-    /// every width instead of at the one that was convenient to check.
+    /// **This is a test of the search, not of the cost model**, and it cannot
+    /// be anything else: it asks `bytes_for` the same question
+    /// `capacity_for_budget` asked it. The version of this that guarded the old
+    /// model asserted `capacity * entry_bytes <= budget < (capacity + 1) *
+    /// entry_bytes`, called that a budget check, and held for every possible
+    /// cost model including one that costed floats at a byte each. Whether the
+    /// model is right is
+    /// `crate::tests::a_full_cache_costs_no_more_than_the_budget_promised`,
+    /// which asks the allocator instead.
     #[test]
-    fn the_capacity_is_the_largest_entry_count_that_fits_the_budget() {
+    fn the_capacity_search_returns_the_largest_count_the_cost_model_allows() {
         for dim in [4, 256, 1024] {
             for budget in [64 * 1024, 1024 * 1024, 64 * 1024 * 1024] {
                 let capacity = capacity_for_budget(budget, dim);
-                let cost = entry_bytes(dim);
-                assert!(capacity * cost <= budget, "dim {dim} budget {budget}");
-                assert!((capacity + 1) * cost > budget, "dim {dim} budget {budget}");
+                assert!(
+                    bytes_for(capacity, dim) <= budget,
+                    "dim {dim} budget {budget} capacity {capacity}"
+                );
+                assert!(
+                    capacity == 1 || bytes_for(capacity + 1, dim) > budget,
+                    "dim {dim} budget {budget} capacity {capacity} was not the largest"
+                );
             }
         }
     }
 
-    /// The budget converts to a capacity that scales with the model width.
+    /// The bucket array is a power of two, which is the term the old model
+    /// left out entirely.
+    ///
+    /// The expected values are worked out from `hashbrown`'s rule rather than
+    /// from this function: seven-eighths of a power-of-two array covers the
+    /// entries.
+    #[test]
+    fn the_bucket_count_is_the_power_of_two_that_holds_the_entries() {
+        assert_eq!(buckets_for(0), 4);
+        assert_eq!(buckets_for(3), 4);
+        assert_eq!(buckets_for(4), 8);
+        assert_eq!(buckets_for(7), 8);
+        assert_eq!(buckets_for(8), 16);
+        assert_eq!(buckets_for(14), 16);
+        assert_eq!(buckets_for(15), 32);
+        // 61,230 * 8 / 7 is 69,977, and the next power of two is 131,072 — the
+        // count a real map was measured to allocate at that size.
+        assert_eq!(buckets_for(61_230), 131_072);
+    }
+
+    /// A wider model gets fewer entries from the same budget.
     #[test]
     fn a_wider_model_gets_fewer_entries_from_the_same_budget() {
         let budget = 64 * 1024 * 1024;
@@ -439,10 +599,11 @@ mod tests {
     }
 
     #[test]
-    fn halving_the_budget_roughly_halves_the_capacity() {
+    fn halving_the_budget_leaves_fewer_than_two_thirds_of_the_capacity() {
         let full = capacity_for_budget(64 * 1024 * 1024, 256);
         let half = capacity_for_budget(32 * 1024 * 1024, 256);
-        assert_eq!(full / 2, half);
+        assert!(half < full * 2 / 3, "{half} against {full}");
+        assert!(half > full / 3, "{half} against {full}");
     }
 
     #[test]
@@ -451,18 +612,43 @@ mod tests {
         assert_eq!(capacity_for_budget(0, 256), 1);
     }
 
-    /// **The default budget is big enough to be worth having.**
-    ///
-    /// A capacity constant nothing pins is free to be anything: setting the old
-    /// `DEFAULT_CAPACITY` to 4 left the entire suite green. This fixes the floor
-    /// in the units a user cares about — how many distinct values of a column
-    /// can be held — and `crate::tests::a_repeated_query_over_fifty_thousand
-    /// _distinct_values_re_embeds_none_of_them` spends it.
+    /// The probe reports at least what the block asked for, and more when the
+    /// allocator rounds up.
+    /// The probe never reports less than the block needs, for either of the two
+    /// blocks the cache holds.
     #[test]
-    fn the_default_budget_holds_at_least_fifty_thousand_vectors() {
+    fn the_allocation_probe_never_reports_less_than_the_block_needs() {
+        for dim in [1, 4, 256, 1024] {
+            let requested = 2 * std::mem::size_of::<usize>() + dim * 4;
+            assert!(
+                vector_bytes(dim) >= requested,
+                "dim {dim}: probe said {} for a {requested}-byte block",
+                vector_bytes(dim)
+            );
+        }
+        for entries in [1, 100, 10_000, 60_000] {
+            let requested = buckets_for(entries) * BUCKET_BYTES + CONTROL_GROUP_BYTES;
+            assert!(
+                bucket_array_bytes(entries) >= requested,
+                "{entries} entries: probe said {} for a {requested}-byte array",
+                bucket_array_bytes(entries)
+            );
+        }
+        assert_eq!(allocation_bytes(0), 0);
+    }
+
+    /// The default budget is still worth having after the cost model was
+    /// corrected.
+    ///
+    /// A floor in the units a user cares about. It is deliberately well under
+    /// what any platform measured gives — macOS lands near 49,900 and Linux
+    /// higher, because glibc rounds a 1,040-byte request less than macOS does —
+    /// so this pins the budget without pinning the allocator.
+    #[test]
+    fn the_default_budget_holds_at_least_thirty_thousand_vectors() {
         let capacity = capacity_for_budget(DEFAULT_BUDGET_BYTES, 256);
         assert!(
-            capacity >= 50_000,
+            capacity >= 30_000,
             "the default budget holds only {capacity} vectors of width 256"
         );
     }

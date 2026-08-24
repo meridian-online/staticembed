@@ -219,6 +219,133 @@ pub fn describe() -> String {
     }
 }
 
+/// A global allocator for the test binary that counts what the calling thread
+/// holds, so a test can ask the allocator how much memory the cache really
+/// costs instead of asking the cost model that chose the cache's size.
+///
+/// This exists because of a defect in the check it replaces. The budget was
+/// guarded by `capacity * entry_bytes(dim) <= budget < (capacity + 1) *
+/// entry_bytes(dim)` — using the same `entry_bytes` that produced `capacity`,
+/// which is the definition of integer division and holds for every possible
+/// cost model. Setting floats to cost one byte each left the whole suite green
+/// at 4.57 times the declared budget.
+///
+/// `#[cfg(test)]`, so the shipped cdylib links none of it and keeps the system
+/// allocator.
+#[cfg(test)]
+mod counting_allocator {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::ffi::c_void;
+
+    // The usable size the allocator really handed out, which is what makes the
+    // measurement catch size-class rounding. Both of these live in the C
+    // library that is linked either way, so neither is a new dependency.
+    #[cfg(target_os = "macos")]
+    extern "C" {
+        fn malloc_size(ptr: *const c_void) -> usize;
+    }
+    #[cfg(target_os = "linux")]
+    extern "C" {
+        fn malloc_usable_size(ptr: *mut c_void) -> usize;
+    }
+
+    /// Bytes the allocator actually reserved for `ptr`.
+    ///
+    /// Falls back to the requested size on platforms with no way to ask, which
+    /// under-counts rather than over-counts — so a measurement there is a lower
+    /// bound on the real cost and the ceiling assertion stays sound.
+    unsafe fn actual_bytes(ptr: *mut u8, layout: Layout) -> usize {
+        #[cfg(target_os = "macos")]
+        {
+            let _ = layout;
+            malloc_size(ptr.cast::<c_void>())
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = layout;
+            malloc_usable_size(ptr.cast::<c_void>())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = ptr;
+            layout.size()
+        }
+    }
+
+    // Per-thread, so tests running in parallel do not pollute each other's
+    // measurement. `const` initialiser, so reading it never allocates and the
+    // allocator cannot re-enter itself.
+    thread_local! {
+        static LIVE: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+
+    fn record(delta: isize) {
+        let _ = LIVE.try_with(|live| {
+            let now = live.get() + delta;
+            live.set(now);
+            let _ = PEAK.try_with(|peak| {
+                if now > peak.get() {
+                    peak.set(now);
+                }
+            });
+        });
+    }
+
+    /// Bytes this thread currently holds, as a delta from whenever you last
+    /// looked. The absolute value is meaningless; the difference is not.
+    pub fn live_bytes() -> isize {
+        LIVE.with(Cell::get)
+    }
+
+    /// The high-water mark since [`reset_peak`], which is what a transient
+    /// double allocation during a hash-map growth shows up in.
+    pub fn peak_bytes() -> isize {
+        PEAK.with(Cell::get)
+    }
+
+    pub fn reset_peak() {
+        PEAK.with(|peak| peak.set(LIVE.with(Cell::get)));
+    }
+
+    pub struct Counting;
+
+    // SAFETY: every method forwards to `System` unchanged and only records the
+    // size alongside it.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            let ptr = System.alloc(layout);
+            if !ptr.is_null() {
+                record(actual_bytes(ptr, layout) as isize);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            record(-(actual_bytes(ptr, layout) as isize));
+            System.dealloc(ptr, layout);
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            record(-(actual_bytes(ptr, layout) as isize));
+            let moved = System.realloc(ptr, layout, new_size);
+            if moved.is_null() {
+                // The old block is still live; put it back on the books.
+                record(actual_bytes(ptr, layout) as isize);
+            } else {
+                let grown = Layout::from_size_align_unchecked(new_size, layout.align());
+                record(actual_bytes(moved, grown) as isize);
+            }
+            moved
+        }
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static COUNTING_ALLOCATOR: counting_allocator::Counting = counting_allocator::Counting;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,16 +535,16 @@ mod tests {
     /// the old `DEFAULT_CAPACITY` set to 4, every other test in this repo
     /// stayed green.
     #[test]
-    fn a_repeated_query_over_fifty_thousand_distinct_values_re_embeds_none_of_them() {
+    fn a_repeated_query_over_forty_thousand_distinct_values_re_embeds_none_of_them() {
         let _guard = serial();
         clear_cache();
-        let column = distinct_values(50_000);
+        let column = distinct_values(40_000);
 
         for value in &column {
             embed(value).expect("embed");
         }
         let first_pass = stats();
-        assert_eq!(first_pass.encoded, 50_000);
+        assert_eq!(first_pass.encoded, 40_000);
         assert_eq!(
             first_pass.uncached, 0,
             "50,000 values must fit the default budget"
@@ -433,7 +560,7 @@ mod tests {
             "a repeated query over 50,000 distinct values re-embedded {} of them",
             second_pass.encoded - first_pass.encoded
         );
-        assert_eq!(second_pass.hits - first_pass.hits, 50_000);
+        assert_eq!(second_pass.hits - first_pass.hits, 40_000);
     }
 
     /// **Past the cache's capacity there is no cliff.**
@@ -584,5 +711,110 @@ mod tests {
         });
 
         assert_eq!(stats().encoded, 400);
+    }
+
+    /// **The cost model is right, measured against the allocator.**
+    ///
+    /// This is the check the budget never had. Every other assertion about
+    /// capacity asks `bytes_for` the same question `capacity_for_budget` asked
+    /// it, and so holds for any cost model at all: the version this replaces
+    /// asserted `capacity * entry_bytes <= budget < (capacity + 1) *
+    /// entry_bytes`, which is the definition of integer division. Costing
+    /// floats at one byte each left the whole suite green at 4.57 times the
+    /// declared budget.
+    ///
+    /// So this one does not consult the model. It fills the cache and asks the
+    /// global allocator — see `counting_allocator` — how many bytes the process
+    /// is holding as a result.
+    ///
+    /// **The tolerance is ±10%, and the two sides mean different things.**
+    ///
+    /// The ceiling is the promise: a cache that spends more than the budget is
+    /// a broken promise, and the band above exists only for allocators nobody
+    /// here has measured. It is not slack for a sloppy model — the two
+    /// omissions this test was written to catch cost 23% (a vector block's
+    /// size class) and 0.02% (the map's extra control group), and the 23% one
+    /// would still fail with the band ten times wider. Measured on
+    /// macOS/aarch64 the model lands 256 bytes under 64 MiB, which is 0.0004%.
+    ///
+    /// The floor catches a model so conservative that the cache is uselessly
+    /// small while still technically fitting. It cannot be tight, because the
+    /// bucket array doubles rather than growing smoothly, so the capacity
+    /// search can stop up to one doubling short of the budget — that array is
+    /// under 5% of the budget at this model's width, which is where 10% comes
+    /// from.
+    #[test]
+    fn a_full_cache_costs_close_to_the_bytes_the_budget_promised() {
+        let _guard = serial();
+
+        // Warm everything that is not the cache — the model, the flight set,
+        // the format buffers — so the window measures the cache and nothing
+        // else. Strings are built inside the loop and dropped there, so the
+        // only thing the window retains is the cache itself.
+        embed("warm the model and the flight set").expect("embed");
+        clear_cache();
+
+        let capacity = stats().capacity as usize;
+        let budget = cache::DEFAULT_BUDGET_BYTES as isize;
+        counting_allocator::reset_peak();
+        let before = counting_allocator::live_bytes();
+        for i in 0..capacity {
+            embed(&format!("budget probe {i}")).expect("embed");
+        }
+        let held = counting_allocator::live_bytes() - before;
+        let peak = counting_allocator::peak_bytes() - before;
+        assert_eq!(stats().entries as usize, capacity, "the cache did not fill");
+
+        let ceiling = budget + budget / 10;
+        let floor = budget - budget / 10;
+        assert!(
+            held <= ceiling,
+            "a full cache holds {held} bytes against a budget of {budget} — the cost model \
+             under-charges by {} bytes an entry",
+            (held - budget) / capacity as isize
+        );
+        assert!(
+            held >= floor,
+            "a full cache holds only {held} bytes of a {budget} budget — the cost model \
+             over-charges and the cache is smaller than it was asked to be"
+        );
+
+        // The high-water mark, not just the resting state. A map that doubles
+        // its bucket array holds the old one and the new one at the same time,
+        // and a budget that only holds at rest is not a budget.
+        assert!(
+            peak <= ceiling,
+            "filling the cache peaked at {peak} bytes against a budget of {budget}"
+        );
+        clear_cache();
+    }
+
+    /// Clearing the cache gives the memory back, including the map's buckets.
+    ///
+    /// `HashMap::clear` keeps the bucket array, which at a full cache is
+    /// megabytes. Someone calling `staticembed_cache_clear()` is asking for the
+    /// memory, so this measures that they get it.
+    #[test]
+    fn clearing_the_cache_returns_the_memory_to_the_allocator() {
+        let _guard = serial();
+        embed("warm").expect("embed");
+        clear_cache();
+
+        let before = counting_allocator::live_bytes();
+        for i in 0..20_000 {
+            embed(&format!("clear probe {i}")).expect("embed");
+        }
+        let while_full = counting_allocator::live_bytes() - before;
+        assert!(
+            while_full > 20_000_000,
+            "expected a real cache, got {while_full} bytes"
+        );
+
+        clear_cache();
+        let after = counting_allocator::live_bytes() - before;
+        assert!(
+            after < while_full / 100,
+            "clearing left {after} bytes of the {while_full} the cache had taken"
+        );
     }
 }

@@ -81,6 +81,12 @@ jobs:
           python3 scripts/check_no_network_deps.py --self-test
           python3 scripts/check_no_network_deps.py --artifact build/staticembed.duckdb_extension
 
+      # Three copies of one signature is three chances to be wrong.
+      - name: The documented surface matches the loaded catalog
+        run: |
+          python3 scripts/check_documented_surface.py --self-test
+          python3 scripts/check_documented_surface.py --extension build/staticembed.duckdb_extension
+
       # LOAD the packaged artifact into a real DuckDB and query it.
       - name: SQL tests
         run: python3 scripts/run_sql_tests.py --extension build/staticembed.duckdb_extension

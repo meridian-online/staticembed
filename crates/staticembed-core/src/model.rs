@@ -183,6 +183,31 @@ mod tests {
         assert_eq!(digest(CONFIG), CONFIG_SHA256, "config.json");
     }
 
+    /// The width the encoder produces is the width the model's own config
+    /// declares.
+    ///
+    /// Everything else that mentions the width takes it from `Model::dim`,
+    /// which is itself measured by encoding a probe string — so an encoder that
+    /// returned five floats for everything would set `dim` to five and satisfy
+    /// every one of those assertions. `config.json` is a second, independent
+    /// statement of the same fact, published with the weights, and this is the
+    /// only place the two are made to agree.
+    #[test]
+    fn the_encoder_width_matches_the_width_the_config_declares() {
+        let text = std::str::from_utf8(CONFIG).expect("config.json is UTF-8");
+        let key = "\"hidden_dim\":";
+        let start = text.find(key).expect("config.json declares hidden_dim") + key.len();
+        let declared: usize = text[start..]
+            .trim_start()
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .and_then(|digits| digits.parse().ok())
+            .expect("hidden_dim is a number");
+
+        let model = bundled().expect("the bundled model loads");
+        assert_eq!(model.dim(), declared, "encoder width against config.json");
+    }
+
     #[test]
     fn the_bundled_model_loads_from_embedded_bytes() {
         let model = bundled().expect("the bundled model loads");
