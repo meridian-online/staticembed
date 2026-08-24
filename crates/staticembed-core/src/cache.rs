@@ -10,9 +10,14 @@
 //!   anyone remembering to bump a version string.
 //!
 //! * **Text.** The exact UTF-8 bytes, with no case folding, trimming or Unicode
-//!   normalisation applied first. A normalisation the encoder does not also
-//!   perform would hand back a vector for text that was never embedded, and the
-//!   caller would have no way to see it happen.
+//!   normalisation applied first. The only normalisation that would be safe is
+//!   the one the tokenizer already applies, and reproducing a dependency's
+//!   normalisation here would mean a tokenizer bump silently changing which
+//!   inputs share an entry. Keying on the exact bytes is correct whatever the
+//!   tokenizer does; what it costs is a duplicate entry for inputs that
+//!   normalise together, which
+//!   `inputs_that_embed_alike_still_occupy_separate_cache_entries` in the crate
+//!   root counts.
 //!
 //! Capacity is bounded because the intended workload is a whole text column. The
 //! cache keeps two generations of at most [`EmbeddingCache::capacity`] entries;
@@ -40,13 +45,13 @@ pub type CacheKey = [u8; 32];
 
 /// Derive the cache key for `text` under the model identified by `model_key`.
 ///
-/// The text length is written before the text so that no two distinct inputs
-/// can be assembled into the same byte stream.
+/// `text` is written last and every field before it is fixed width, so two
+/// different inputs cannot assemble into the same byte stream. A field added
+/// after `text` would break that and would need a length prefix in front of it.
 pub fn cache_key(model_key: &[u8; 32], text: &str) -> CacheKey {
     let mut hasher = Sha256::new();
     hasher.update(CACHE_KEY_DOMAIN);
     hasher.update(model_key);
-    hasher.update((text.len() as u64).to_le_bytes());
     hasher.update(text.as_bytes());
     hasher.finalize().into()
 }
@@ -171,20 +176,21 @@ mod tests {
         assert!(cache.get(&cache_key(&model_key(0xBB), "steel")).is_none());
     }
 
+    /// The text half of the key is the exact input bytes.
+    ///
+    /// Every pair below differs only by case, whitespace or Unicode
+    /// composition, and this model's tokenizer folds all three away — so these
+    /// are pairs the encoder gives the SAME vector for, and the cache still
+    /// gives them two entries. That is the deliberate direction to be wrong in:
+    /// a duplicate entry costs memory, while a key that collapsed two inputs
+    /// the tokenizer did not would return a vector nobody asked for.
     #[test]
-    fn different_text_under_one_model_keys_differently() {
+    fn the_cache_key_uses_the_exact_input_bytes() {
         let key = model_key(0x11);
         assert_ne!(cache_key(&key, "steel"), cache_key(&key, "steel "));
         assert_ne!(cache_key(&key, "Steel"), cache_key(&key, "steel"));
         assert_ne!(cache_key(&key, ""), cache_key(&key, " "));
-    }
-
-    /// Concatenation cannot be confused for a longer string: the length prefix
-    /// separates them.
-    #[test]
-    fn adjacent_inputs_cannot_collide_through_concatenation() {
-        let key = model_key(0x22);
-        assert_ne!(cache_key(&key, "ab"), cache_key(&key, "a\u{0}b"));
+        assert_ne!(cache_key(&key, "cafe\u{301}"), cache_key(&key, "caf\u{e9}"));
     }
 
     #[test]

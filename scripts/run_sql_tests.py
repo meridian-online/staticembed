@@ -96,6 +96,10 @@ def main() -> int:
     parser.add_argument("--extension", required=True, type=pathlib.Path)
     parser.add_argument("--duckdb", default=os.environ.get("DUCKDB", "duckdb"))
     parser.add_argument("--sql-dir", type=pathlib.Path, default=REPO_ROOT / "test" / "sql")
+    parser.add_argument(
+        "--only",
+        help="run only SQL files whose name contains this substring",
+    )
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -113,8 +117,11 @@ def main() -> int:
         return 2
 
     sql_files = sorted(args.sql_dir.glob("*.sql"))
+    if args.only:
+        sql_files = [path for path in sql_files if args.only in path.name]
     if not sql_files:
-        print(f"no SQL test files in {args.sql_dir}", file=sys.stderr)
+        where = f"{args.sql_dir}" + (f" matching {args.only!r}" if args.only else "")
+        print(f"no SQL test files in {where}", file=sys.stderr)
         return 2
 
     failures = 0

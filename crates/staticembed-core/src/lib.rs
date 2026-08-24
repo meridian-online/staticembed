@@ -203,6 +203,61 @@ mod tests {
         );
     }
 
+    /// The tokenizer folds case, surrounding whitespace and Unicode composition
+    /// away, so these inputs are one value to the model.
+    ///
+    /// Pinned because it is a property of the bundled tokenizer rather than of
+    /// this code: a caller may rely on `embed(name)` matching `embed(NAME)`, and
+    /// a tokenizer swap that changed it would change the SQL contract with
+    /// nothing else reddening.
+    #[test]
+    fn case_and_surrounding_whitespace_do_not_change_the_vector() {
+        let _guard = serial();
+        let pairs = [
+            ("steel", "STEEL"),
+            ("steel", "  steel  "),
+            ("caf\u{e9}", "cafe\u{301}"),
+        ];
+        for (left, right) in pairs {
+            assert_eq!(
+                embed(left).expect("embed").as_ref(),
+                embed(right).expect("embed").as_ref(),
+                "{left:?} and {right:?} should embed alike",
+            );
+        }
+    }
+
+    /// Word order does not change the vector, and repetition does.
+    ///
+    /// A Model2Vec vector is the mean of its token vectors, so a phrase and its
+    /// shuffle land in the same place. That is the model, not a defect, and it
+    /// is pinned here because it bounds what the vectors can be asked to do.
+    #[test]
+    fn the_pool_is_a_mean_so_order_is_lost_and_repetition_is_not() {
+        let _guard = serial();
+        assert_eq!(
+            embed("valve bodies").expect("embed").as_ref(),
+            embed("bodies valve").expect("embed").as_ref(),
+        );
+        assert_ne!(
+            embed("steel steel copper").expect("embed").as_ref(),
+            embed("steel copper").expect("embed").as_ref(),
+        );
+    }
+
+    /// Those pairs are nevertheless separate cache entries, because the key is
+    /// the exact bytes. This is the cost of not reproducing the tokenizer's
+    /// normalisation in the cache layer, counted rather than left implicit.
+    #[test]
+    fn inputs_that_embed_alike_still_occupy_separate_cache_entries() {
+        let _guard = serial();
+        clear_cache();
+        embed("steel").expect("embed");
+        embed("STEEL").expect("embed");
+        assert_eq!(stats().entries, 2);
+        assert_eq!(stats().encoded, 2);
+    }
+
     #[test]
     fn every_vector_has_the_declared_width() {
         let _guard = serial();

@@ -22,6 +22,8 @@ Being a scalar is the point. It composes with `WHERE` and `LIMIT`, so you can em
 
 **It is not a drop-in replacement for a hosted transformer, and the difference is measured rather than hedged.** A static embedding has no contextual attention. On the evidence we have, a two-dimensional map built from these vectors recovers most of the cluster structure a hosted transformer recovers — the regions of the map mean something. What it does not preserve is which specific rows sit next to which: only a minority of any point's nearest neighbours survive the swap.
 
+It also does not read word order. A Model2Vec vector is the mean of its token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same vector. Repetition does count — a word twice pulls the mean toward it — but any phrase and its shuffle land in the same place.
+
 So this is built for looking at the shape of a corpus, and it is not built for "show me the rows most like this one". If nearest-neighbour lookup is what you need, this is the wrong tool, and we would rather say so here than have you find out from your results.
 
 Figures, corpora and method are published with the measurement in [meridian-online/finetype](https://github.com/meridian-online/finetype).
@@ -48,6 +50,12 @@ If you want the single behaviour a text pipeline usually gives you, ask for it:
 ```sql
 SELECT embed(coalesce(description, '')) FROM corpus;
 ```
+
+### What counts as the same string
+
+The bundled tokenizer lowercases, strips accents and ignores surrounding whitespace, so `embed('Steel')`, `embed('steel')` and `embed('  steel  ')` are the same vector, and `embed('café')` matches `embed('cafe' || chr(769))`. You do not have to normalise a column before embedding it. Word order still matters, and different words still give different vectors.
+
+The cache keys on the exact input bytes rather than on the tokenizer's folded form, so those variants do occupy separate cache entries. That is deliberate: reproducing a dependency's normalisation in the cache would mean a tokenizer bump quietly changing which inputs share an entry, and the failure would be a vector returned for text nobody embedded.
 
 ### Repeating a query does not re-embed
 
