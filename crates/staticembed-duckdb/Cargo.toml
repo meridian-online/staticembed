@@ -1,0 +1,19 @@
+[package]
+name = "staticembed-duckdb"
+description = "DuckDB scalar function returning a static embedding for a string"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The community-extensions build contract derives the library filename from the
+# extension name, not from the package name, so the cdylib is `staticembed`.
+[lib]
+name = "staticembed"
+crate-type = ["cdylib"]
+
+[dependencies]
+duckdb = { workspace = true }
+libduckdb-sys = { workspace = true }
+staticembed-core = { workspace = true }

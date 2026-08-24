@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = ["crates/staticembed-core", "crates/staticembed-duckdb"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/meridian-online/staticembed"
+
+[workspace.dependencies]
+# The upstream Model2Vec implementation. `default-features = false` drops
+# `hf-hub`, which is the only door to a network stack in this tree: the `hf-hub`
+# feature pulls `ureq`, and `ureq` pulls TLS. `local-only` additionally compiles
+# out the download path so a call to `from_pretrained` with a repo id returns an
+# error instead of reaching for the network. The model arrives through
+# `StaticModel::from_bytes` over `include_bytes!` data, so nothing is fetched.
+model2vec-rs = { version = "0.2.1", default-features = false, features = ["local-only"] }
+
+# `tokenizers` is a transitive dependency of model2vec-rs, listed here only to
+# choose its regex backend. Its default features are `progressbar` + `onig` +
+# `esaxx_fast`; `onig` and `esaxx_fast` each build a bundled C/C++ library, and
+# `tokenizers/http` would bring back the TLS stack `model2vec-rs`'s
+# default-features-off already removed. `fancy-regex` is pure Rust and needs no
+# native toolchain, which is what keeps this extension cross-compilable.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
+sha2 = "0.10"
+
+# Pinned exactly, matching the DuckDB C API surface this artifact is built
+# against. The stable C_STRUCT ABI floor the packaged artifact declares is
+# `MIN_DUCKDB_VERSION` in crates/staticembed-duckdb/src/lib.rs.
+duckdb = { version = "=1.10505.0", features = ["loadable-extension", "vscalar"] }
+libduckdb-sys = "=1.10505.0"
+
+staticembed-core = { path = "crates/staticembed-core" }
+
+[profile.release]
+# The bundled weights dominate the artifact; there is no reason to also carry
+# debug info for them.
+strip = "debuginfo"

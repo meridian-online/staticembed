@@ -1,0 +1,4 @@
+/target
+*.duckdb_extension
+__pycache__/
+*.pyc

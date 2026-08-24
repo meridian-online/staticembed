@@ -1,0 +1,18 @@
+[package]
+name = "staticembed-core"
+description = "Static text embeddings from a model bundled at build time — the engine behind the staticembed DuckDB extension"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+model2vec-rs = { workspace = true }
+sha2 = { workspace = true }
+# Present to select the regex backend; see the comment on the workspace
+# dependency. No item from it is named in this crate's source.
+tokenizers = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["tokenizers"]
