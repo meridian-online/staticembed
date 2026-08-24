@@ -18,10 +18,12 @@ SELECT must('and they are exactly the documented four',
     (SELECT list_sort(list(function_name)) FROM registered)
     = ['embed', 'staticembed_cache_clear', 'staticembed_cache_stats', 'staticembed_version']);
 
--- The card does not license nearest-neighbour lookup: the measured position of
--- this model is that a map from its vectors keeps the clusters and loses the
--- neighbourhoods. A function that invited "show me the rows most like this one"
--- would promise what the model does not deliver.
+-- No nearest-neighbour lookup, deliberately. The measured position of this
+-- model is that a map built from its vectors keeps the cluster structure and
+-- loses the neighbourhoods, which README's "What it is not" states in full. A
+-- function that invited "show me the rows most like this one" would promise
+-- what the model does not deliver, so the absence is asserted here rather than
+-- left to whoever adds the next function to remember.
 SELECT must('no similarity or nearest-neighbour function is registered',
     (SELECT count(*) FROM registered
      WHERE regexp_matches(function_name, '(?i)similar|neighbou?r|nearest|knn|distance|match|rank')) = 0);

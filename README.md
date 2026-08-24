@@ -57,19 +57,26 @@ The bundled tokenizer lowercases, strips accents and ignores surrounding whitesp
 
 The cache keys on the exact input bytes rather than on the tokenizer's folded form, so those variants do occupy separate cache entries. That is deliberate: reproducing a dependency's normalisation in the cache would mean a tokenizer bump quietly changing which inputs share an entry, and the failure would be a vector returned for text nobody embedded.
 
-### Repeating a query does not re-embed
+### Repeating a query does not re-embed, up to a stated number of distinct values
 
-Vectors are cached against the exact input bytes and a digest of the bundled model's own files, so re-running a query over unchanged input costs nothing, and a future build with different weights cannot serve you the old vectors. `staticembed_cache_stats().encoded` counts how many times the encoder has actually run since the last clear, which is how you can see it for yourself:
+Vectors are cached against the exact input bytes and a digest of the bundled model's own files, so re-running a query re-embeds nothing — **for as many distinct values as the cache holds**, and a future build with different weights cannot serve you the old ones. `staticembed_cache_stats()` is how you see which case you are in rather than guessing from how long the query took:
 
 ```sql
 SELECT staticembed_cache_clear();
 CREATE TABLE v AS SELECT embed(description) FROM corpus;
-SELECT staticembed_cache_stats().encoded;   -- one per distinct value
+SELECT staticembed_cache_stats();   -- uncached 0 means the column fitted, and
+                                    -- then encoded is one per distinct value
 CREATE TABLE w AS SELECT embed(description) FROM corpus;
-SELECT staticembed_cache_stats().encoded;   -- unchanged
+SELECT staticembed_cache_stats();   -- encoded unchanged, if uncached was 0
 ```
 
-The cache is bounded rather than unlimited: it holds two generations of `capacity` entries, and a value that keeps being asked for is kept. `staticembed_cache_stats().capacity` reports the size in force.
+**The bound.** The cache spends a fixed memory budget, so it holds `capacity` vectors and no more; `staticembed_cache_stats().capacity` reports the figure for your build, and it falls as the model's vector width rises. Once it is full it **stops admitting new values rather than evicting old ones**, and `uncached` counts every lookup it turned away.
+
+That choice is the whole behaviour above the bound, so it is worth being plain about. A column with more distinct values than `capacity` is served for `capacity` of them on a re-run and re-embeds the rest — a hit rate of `capacity / distinct`, holding steady as the column grows. Under any recency-ordered policy instead — LRU, FIFO, or the two generations this extension shipped with first — a repeated scan evicts every value exactly before it is next wanted and the hit rate is **zero**, which is a cliff rather than a slope and is much worse than it sounds.
+
+Above the bound the guarantee is weaker in a second way as well: a value the cache turned away is re-embedded for every row that carries it, and two threads meeting the same turned-away value will each embed it. Below the bound neither happens — one encode per distinct value, whatever the thread count.
+
+What it costs is adaptivity: the values kept are the ones seen first in the session, so if you move on to a different column the cache stays full of the old one. `SELECT staticembed_cache_clear();` empties it, and a non-zero `uncached` is the sign that it is time.
 
 ## Building it
 
@@ -100,4 +107,6 @@ Early. The extension builds, loads and answers queries; nothing is published to 
 
 ## Licence
 
-MIT. The embedding model is a third-party Model2Vec release under its own MIT licence, reproduced with the bundled weights in [`models/potion-base-8M/MODEL_CARD.md`](models/potion-base-8M/MODEL_CARD.md).
+This repository is MIT; the `LICENSE` file at its root is that licence and covers the code here.
+
+The bundled embedding model is a third-party Model2Vec release. Its publisher **declares** it MIT, in the model card at [`models/potion-base-8M/MODEL_CARD.md`](models/potion-base-8M/MODEL_CARD.md) — the frontmatter and the citation both say so. The upstream repository carries no `LICENSE` file at the pinned revision, so **no MIT text or copyright line for the model is reproduced here**, because there is none to copy. If you need the licence in hand rather than declared, take it up with the publisher before redistributing the weights.

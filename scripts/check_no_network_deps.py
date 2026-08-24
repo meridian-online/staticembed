@@ -8,6 +8,27 @@ TLS client from the tree at all, and that is mechanical.
 
 Two checks, and they answer different questions.
 
+UNDEFINED SYMBOLS
+    Every call a binary makes into the platform appears in its undefined symbol
+    table. So if none of the socket API's entry points is undefined, that binary
+    makes no direct socket call. This check came from the reviewer of the first
+    version of this file, who found the assertion it was missing.
+
+    On its own it is not a proof of absence, and it is worth knowing why:
+    `/usr/bin/curl` passes it. curl opens sockets through `libcurl.4.dylib`, so
+    the socket calls are undefined in the library rather than in the binary. It
+    is the LINKED LIBRARIES check below that fails curl.
+
+    Together the two are a proof of absence for this artifact, and the argument
+    is short enough to state. It links four things: itself, libiconv,
+    CoreFoundation and libSystem. libiconv converts charsets. Every route to a
+    socket that the other two offer — the BSD calls in libSystem, and CFSocket
+    and CFStream in CoreFoundation — is in the list below, and none of them is
+    undefined in the artifact. There is nowhere else to delegate to.
+
+    What neither covers: raw syscall instructions that bypass libSystem, and a
+    `dlopen` of a library named at runtime. Nothing in this tree does either.
+
 RUNTIME DEPENDENCY TREE
     `cargo tree --workspace --edges normal` is the set of crates compiled into
     the artifact. Build-dependencies are deliberately excluded: `libduckdb-sys`
@@ -64,6 +85,53 @@ FORBIDDEN_CRATES = (
 # Dynamic library names that mean a TLS or HTTP stack was linked.
 FORBIDDEN_LIBRARY_PATTERN = re.compile(r"lib(ssl|crypto|curl|nghttp2)", re.IGNORECASE)
 
+# Entry points to the platform's socket API. A binary that can reach the network
+# calls at least one of these, so their joint absence from the undefined symbol
+# table is the thing that makes "no network" a proof rather than a hope.
+#
+# BSD sockets, name resolution, and the two macOS frameworks that offer a
+# connection without going through the BSD calls.
+FORBIDDEN_SYMBOLS = (
+    "socket",
+    "socketpair",
+    "connect",
+    "connectx",
+    "bind",
+    "listen",
+    "accept",
+    "accept4",
+    "send",
+    "sendto",
+    "sendmsg",
+    "sendmmsg",
+    "recv",
+    "recvfrom",
+    "recvmsg",
+    "recvmmsg",
+    "shutdown",
+    "setsockopt",
+    "getsockopt",
+    "getpeername",
+    "getsockname",
+    "getaddrinfo",
+    "freeaddrinfo",
+    "getnameinfo",
+    "gethostbyname",
+    "gethostbyname2",
+    "gethostbyaddr",
+    "res_query",
+    "res_search",
+    "res_init",
+    "CFSocketCreate",
+    "CFStreamCreatePairWithSocketToHost",
+    "CFReadStreamOpen",
+    "SSLHandshake",
+    "SSLCreateContext",
+    "nw_connection_create",
+    "nw_connection_start",
+    "nw_endpoint_create_host",
+)
+
 # `name vX.Y.Z` is how every cargo tree line names a crate.
 CRATE_LINE = re.compile(r"([A-Za-z0-9_.-]+) v\d")
 
@@ -87,6 +155,42 @@ def runtime_tree() -> str:
     if completed.returncode != 0:
         raise SystemExit(f"cargo tree failed:\n{completed.stdout}{completed.stderr}")
     return completed.stdout
+
+
+def undefined_symbols(artifact: pathlib.Path) -> list[str] | None:
+    """The artifact's undefined symbols, one bare name per entry.
+
+    Leading underscores (Mach-O) and `@GLIBC_2.x` version suffixes (ELF) are
+    stripped, so a name in FORBIDDEN_SYMBOLS matches on either platform.
+    """
+    if not shutil.which("nm"):
+        return None
+    for arguments in (["-u"], ["-D", "-u"], ["--dynamic", "--undefined-only"]):
+        completed = subprocess.run(
+            ["nm", *arguments, str(artifact)], text=True, capture_output=True, check=False
+        )
+        if completed.returncode == 0 and completed.stdout.strip():
+            break
+    else:
+        raise SystemExit(f"nm reported no undefined symbols for {artifact}; that is not credible")
+
+    names = []
+    for line in completed.stdout.splitlines():
+        token = line.split()[-1] if line.split() else ""
+        if not token:
+            continue
+        names.append(token.lstrip("_").split("@", 1)[0])
+    return names
+
+
+def offending_symbols(names: list[str]) -> set[str]:
+    """Which forbidden entry points appear, matched whole rather than as
+    substrings.
+
+    Substring matching is what made the first draft of this useless: `bind`
+    matched `dyld_stub_binder`, which is the dynamic linker and not a socket.
+    """
+    return set(names) & set(FORBIDDEN_SYMBOLS)
 
 
 def linked_libraries(artifact: pathlib.Path) -> list[str] | None:
@@ -134,7 +238,40 @@ def self_test() -> int:
         print("self-test FAILED: the library pattern matches libSystem", file=sys.stderr)
         return 1
 
-    print("self-test ok: the matcher finds a planted TLS stack and clears a clean tree")
+    # Every forbidden symbol, one at a time, in both platforms' spellings. A
+    # typo in one name would otherwise weaken the check silently and forever.
+    for symbol in FORBIDDEN_SYMBOLS:
+        for planted in (f"_{symbol}", symbol, f"{symbol}@GLIBC_2.2.5"):
+            names = [planted.lstrip("_").split("@", 1)[0]]
+            if offending_symbols(names) != {symbol}:
+                print(f"self-test FAILED: {planted!r} was not caught", file=sys.stderr)
+                return 1
+
+    # The undefined symbols a clean build of this extension really has. Every
+    # one of these must pass, or the check would fail on its own artifact.
+    clean_symbols = [
+        "dyld_stub_binder",  # the dynamic linker; `bind` as a substring of it
+        "malloc",
+        "free",
+        "open",
+        "read",
+        "write",
+        "close",
+        "pthread_create",
+        "pthread_cond_wait",
+        "getentropy",
+        "sysconf",
+    ]
+    caught = offending_symbols(clean_symbols)
+    if caught:
+        print(f"self-test FAILED: clean symbols matched {sorted(caught)}", file=sys.stderr)
+        return 1
+
+    print(
+        f"self-test ok: the matcher finds a planted TLS stack, catches all "
+        f"{len(FORBIDDEN_SYMBOLS)} socket entry points in both spellings, and "
+        f"clears a clean tree and a clean symbol table"
+    )
     return 0
 
 
@@ -165,6 +302,26 @@ def main() -> int:
         if not args.artifact.is_file():
             print(f"FAIL: no artifact at {args.artifact}", file=sys.stderr)
             return 1
+
+        symbols = undefined_symbols(args.artifact)
+        if symbols is None:
+            print("SKIPPED: nm is not available, so the undefined symbols were not checked")
+        else:
+            caught = offending_symbols(symbols)
+            if caught:
+                print(
+                    "FAIL: the artifact can reach the network — its undefined symbols include "
+                    + ", ".join(sorted(caught)),
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print(
+                    f"ok: none of the {len(FORBIDDEN_SYMBOLS)} socket entry points is undefined "
+                    f"in the artifact ({len(symbols)} undefined symbols in total), so it makes "
+                    f"no direct socket call"
+                )
+
         libraries = linked_libraries(args.artifact)
         if libraries is None:
             print("SKIPPED: neither otool nor ldd is available, so linked libraries were not checked")

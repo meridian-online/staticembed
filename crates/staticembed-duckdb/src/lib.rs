@@ -6,7 +6,7 @@
 //! |---|---|---|
 //! | `embed(text VARCHAR)` | `FLOAT[]` | the product: one row in, one vector out |
 //! | `staticembed_version()` | `VARCHAR` | which build, which model, which width |
-//! | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, entries, capacity)` | makes "did it re-embed?" answerable in SQL |
+//! | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | makes "did it re-embed?" answerable in SQL |
 //! | `staticembed_cache_clear()` | `BIGINT` | vectors dropped; lets a session start from a known state |
 //!
 //! `embed` is a **scalar**, and that is the product argument rather than an
@@ -171,17 +171,24 @@ impl VScalar for Version {
     }
 }
 
-/// `staticembed_cache_stats() → STRUCT(hits, misses, encoded, entries, capacity)`
+/// `staticembed_cache_stats() → STRUCT(hits, misses, encoded, uncached, entries, capacity)`
 ///
 /// `encoded` is the number of times the encoder has actually run since the last
 /// `staticembed_cache_clear()`. It is the observable behind "a repeated query
 /// does not re-embed": run a query twice and `encoded` does not move.
+///
+/// `uncached` is how many lookups the cache was too full to store. Non-zero
+/// means the column has more distinct values than `capacity`, so a repeated
+/// query will re-embed the excess — which is the one condition under which
+/// `encoded` legitimately moves on a repeat.
 struct CacheStats;
 
 /// Field order of the STRUCT `staticembed_cache_stats()` returns. The order is
 /// part of the signature, so it is written once and used for both the type and
 /// the write.
-const STATS_FIELDS: [&str; 5] = ["hits", "misses", "encoded", "entries", "capacity"];
+const STATS_FIELDS: [&str; 6] = [
+    "hits", "misses", "encoded", "uncached", "entries", "capacity",
+];
 
 impl VScalar for CacheStats {
     type State = ();
@@ -196,6 +203,7 @@ impl VScalar for CacheStats {
             stats.hits,
             stats.misses,
             stats.encoded,
+            stats.uncached,
             stats.entries,
             stats.capacity,
         ];

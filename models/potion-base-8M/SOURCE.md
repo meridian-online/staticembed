@@ -1,6 +1,8 @@
 # Bundled model
 
-`minishlab/potion-base-8M`, a Model2Vec static embedding model, taken from the published Hugging Face release and embedded in the extension binary at build time. Licence: MIT (see `MODEL_CARD.md`).
+`minishlab/potion-base-8M`, a Model2Vec static embedding model, taken from the published Hugging Face release and embedded in the extension binary at build time.
+
+**Licence: declared MIT, not reproduced.** `MODEL_CARD.md` is the upstream README at the pinned revision; its frontmatter says `license: mit` and its citation repeats it. The upstream repository has no `LICENSE` file at that revision — the files it publishes are `.gitattributes`, `README.md`, `config.json`, `model.safetensors`, `modules.json`, `onnx/model.onnx`, `special_tokens_map.json`, `tokenizer.json`, `tokenizer_config.json` and `vocab.txt` — so there is no MIT text or copyright line to carry alongside the weights, and none is claimed here.
 
 Source: `https://huggingface.co/minishlab/potion-base-8M`
 Revision: `bf8b056651a2c21b8d2565580b8569da283cab23`
