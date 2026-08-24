@@ -4,19 +4,19 @@
 --
 -- The surface is derived, not asserted from memory: the prelude snapshots
 -- duckdb_functions() before LOAD, so the delta below is exactly what this
--- extension registered. Adding a fifth function reddens this file.
+-- extension registered. Adding a sixth function reddens this file.
 
 CREATE TABLE registered AS
     SELECT DISTINCT function_name FROM duckdb_functions()
     WHERE function_name NOT IN (SELECT function_name FROM staticembed_baseline_functions)
       AND function_name <> 'must';
 
-SELECT must('the extension registers four functions',
-    (SELECT count(*) FROM registered) = 4);
+SELECT must('the extension registers five functions',
+    (SELECT count(*) FROM registered) = 5);
 
-SELECT must('and they are exactly the documented four',
+SELECT must('and they are exactly the documented five',
     (SELECT list_sort(list(function_name)) FROM registered)
-    = ['embed', 'staticembed_cache_clear', 'staticembed_cache_stats', 'staticembed_version']);
+    = ['embed', 'embed_is_truncated', 'staticembed_cache_clear', 'staticembed_cache_stats', 'staticembed_version']);
 
 -- No nearest-neighbour lookup, deliberately. The measured position of this
 -- model is that a map built from its vectors keeps the cluster structure and

@@ -19,6 +19,10 @@
 //! * Two threads asking for the same text at the same time produce one encode,
 //!   not two: the second waits for the first. Without that, a scan at DuckDB's
 //!   default thread count reported 29 encodes for a ten-distinct-value column.
+//! * [`embed`] builds its vector from at most [`model::MAX_TOKENS`] tokens of
+//!   `text`; anything past that is discarded before the mean, and the vector
+//!   that comes back is full width and unit norm either way — nothing about it
+//!   says content was dropped. [`is_truncated`] is how a caller finds out.
 //! * Nothing here reads a file or opens a socket after compilation.
 
 pub mod cache;
@@ -115,6 +119,17 @@ pub struct Stats {
 /// Width of every vector this build returns.
 pub fn dim() -> Result<usize, String> {
     Ok(model::bundled()?.dim())
+}
+
+/// Whether [`embed`] would discard content of `text`: it tokenises to more ids
+/// than the model accepts, so the excess is truncated before pooling and the
+/// vector `embed` returns does not reflect all of `text`.
+///
+/// Not cached: this reads the tokenizer, not the model's weights, so it is
+/// already far cheaper than an encode and there is nothing here that repeating
+/// a query would save.
+pub fn is_truncated(text: &str) -> Result<bool, String> {
+    Ok(model::bundled()?.is_truncated(text))
 }
 
 fn encode(model: &model::Model, text: &str) -> Result<Arc<[f32]>, String> {

@@ -1682,6 +1682,7 @@ name = "staticembed-core"
 version = "0.1.0"
 dependencies = [
  "model2vec-rs",
+ "serde_json",
  "sha2",
  "tokenizers",
 ]

@@ -1,10 +1,11 @@
 //! The `staticembed` DuckDB extension.
 //!
-//! The whole registered surface is four functions:
+//! The whole registered surface is five functions:
 //!
 //! | function | returns | why it exists |
 //! |---|---|---|
 //! | `embed(text VARCHAR)` | `FLOAT[]` | the product: one row in, one vector out |
+//! | `embed_is_truncated(text VARCHAR)` | `BOOLEAN` | whether `embed(text)` had to drop content past the token limit |
 //! | `staticembed_version()` | `VARCHAR` | which build, which model, which width |
 //! | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | makes "did it re-embed?" answerable in SQL |
 //! | `staticembed_cache_clear()` | `BIGINT` | vectors dropped; lets a session start from a known state |
@@ -28,6 +29,15 @@
 //! are different on purpose: absence of a value is not the same as a value that
 //! carries no signal. A caller that wants the pipeline's single behaviour for
 //! both writes `embed(coalesce(t, ''))`.
+//!
+//! # Truncation
+//!
+//! `embed` builds its vector from at most 512 tokens of `text`; anything past
+//! that is discarded before the mean, and the vector that comes back is full
+//! width and unit norm either way, so a truncated result looks exactly like a
+//! complete one. `embed_is_truncated(text)` answers "did this happen" directly,
+//! without asking the caller to know the limit is 512: `embed_is_truncated(NULL)`
+//! is `NULL`, matching `embed(NULL)`.
 
 use std::error::Error;
 use std::ffi::CString;
@@ -110,6 +120,34 @@ fn write_float_lists(
     Ok(())
 }
 
+/// Write one `BOOLEAN` per row, with NULL rows left null.
+///
+/// The slice write and the null marking are two separate passes over `rows`
+/// rather than one, because the slice borrows `output` and `FlatVector::set_null`
+/// needs its own `&mut` — the same reason [`write_float_lists`] separates the
+/// float write from `set_entry`/`set_null`.
+fn write_bool_column(
+    output: &mut dyn WritableVector,
+    rows: &[Option<bool>],
+) -> Result<(), Box<dyn Error>> {
+    let mut vector = output.flat_vector();
+    {
+        // SAFETY: `rows.len()` slots were reserved for this invocation and the
+        // output column is BOOLEAN by the registered return type, whose
+        // physical storage is `bool`.
+        let slice = unsafe { vector.as_mut_slice_with_len::<bool>(rows.len()) };
+        for (row, value) in rows.iter().enumerate() {
+            slice[row] = value.unwrap_or(false);
+        }
+    }
+    for (row, value) in rows.iter().enumerate() {
+        if value.is_none() {
+            vector.set_null(row);
+        }
+    }
+    Ok(())
+}
+
 /// `embed(text VARCHAR) → FLOAT[]`
 ///
 /// The vector for one string, from the model bundled in this binary. No network
@@ -140,6 +178,42 @@ impl VScalar for Embed {
         vec![ScalarFunctionSignature::exact(
             vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)],
             LogicalTypeHandle::list(&LogicalTypeHandle::from(LogicalTypeId::Float)),
+        )]
+    }
+}
+
+/// `embed_is_truncated(text VARCHAR) → BOOLEAN`
+///
+/// True if `embed(text)` had to drop content: `text` tokenises to more ids than
+/// the model accepts, so the excess never reaches the mean and the vector
+/// `embed` returns does not reflect all of `text` — even though it is full
+/// width and unit norm like any other. See the module docs' *Truncation*
+/// section for the limit and what a caller does with this.
+struct IsTruncated;
+
+impl VScalar for IsTruncated {
+    type State = ();
+
+    fn invoke(
+        _state: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn Error>> {
+        let cells = read_varchar_column(input, 0);
+        let mut rows: Vec<Option<bool>> = Vec::with_capacity(cells.len());
+        for cell in &cells {
+            match cell {
+                Cell::Null => rows.push(None),
+                Cell::Text(text) => rows.push(Some(staticembed_core::is_truncated(text)?)),
+            }
+        }
+        write_bool_column(output, &rows)
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(
+            vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)],
+            LogicalTypeHandle::from(LogicalTypeId::Boolean),
         )]
     }
 }
@@ -280,6 +354,7 @@ impl VScalar for CacheClear {
 /// The connection must be valid for the lifetime of the extension.
 pub unsafe fn extension_entrypoint(con: duckdb::Connection) -> Result<(), Box<dyn Error>> {
     con.register_scalar_function::<Embed>("embed")?;
+    con.register_scalar_function::<IsTruncated>("embed_is_truncated")?;
     con.register_scalar_function::<Version>("staticembed_version")?;
     con.register_scalar_function::<CacheStats>("staticembed_cache_stats")?;
     con.register_scalar_function::<CacheClear>("staticembed_cache_clear")?;

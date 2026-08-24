@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 
 use model2vec_rs::model::StaticModel;
 use sha2::{Digest, Sha256};
+use tokenizers::Tokenizer;
 
 /// The Hugging Face repository the bundled assets came from.
 pub const MODEL_ID: &str = "minishlab/potion-base-8M";
@@ -28,6 +29,19 @@ pub const CONFIG_SHA256: &str = "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06
 const WEIGHTS: &[u8] = include_bytes!("../../../models/potion-base-8M/model.safetensors");
 const TOKENIZER: &[u8] = include_bytes!("../../../models/potion-base-8M/tokenizer.json");
 const CONFIG: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json");
+
+/// The token cap [`Model::embed`] truncates to before pooling: text that
+/// tokenises (after the encoder's own char-level pre-truncation and
+/// out-of-vocabulary filter) to more ids than this is truncated, and the
+/// excess never reaches the mean.
+///
+/// This is `model2vec_rs::StaticModel::encode`'s own default, `Some(512)` —
+/// declared here, and passed explicitly by [`Model::embed`], rather than left
+/// as the literal inside that call, so this crate has exactly one place that
+/// says "512" instead of two that are expected to agree. [`Model::is_truncated`]
+/// is the other reader of this constant; a test pins that the two stay in
+/// step at the boundary.
+pub const MAX_TOKENS: usize = 512;
 
 /// Domain tag mixed into the model key so the digest cannot be confused with a
 /// plain SHA-256 of any one asset.
@@ -57,6 +71,88 @@ pub struct Model {
     inner: StaticModel,
     dim: usize,
     key: [u8; 32],
+    truncation: TruncationProbe,
+}
+
+/// A second, independent reader of the bundled tokenizer, used only to answer
+/// "would `embed` truncate this text" without paying for a full encode.
+///
+/// `model2vec_rs::StaticModel` parses its own tokenizer at load and keeps it
+/// private, with no accessor — so answering this question needs a tokenizer of
+/// its own. It is loaded from the identical `TOKENIZER` bytes [`Model`] itself
+/// loads from, so the two agree on what a token is.
+///
+/// This deliberately does **not** reproduce `encode_with_args`'s char-level
+/// pre-truncation (to `max_tokens * median_token_length` characters, a private
+/// optimisation with no public accessor for the length it uses). A first
+/// version did, recomputing its own copy of that median from the vocabulary —
+/// and for a text built of one token repeated, where the per-token character
+/// count lands exactly on that median, the two truncations coincide: the
+/// probe's own pre-cut already lands on exactly [`MAX_TOKENS`] ids, so the
+/// over-the-limit count it goes on to check can never exceed the limit it is
+/// checking against, and the probe reports "not clipped" for text of any
+/// length. Tokenising the whole string and counting is slower for a
+/// pathologically long text, but it cannot mask itself this way, and the
+/// evidence behind this card found no text where the character cap fires
+/// before the token cap does.
+struct TruncationProbe {
+    tokenizer: Tokenizer,
+    /// The id `model2vec_rs` drops from a token list before truncating and
+    /// pooling it. Recomputed here the same way its own (private) metadata
+    /// step does: there is no accessor for it either.
+    unk_token_id: Option<usize>,
+}
+
+impl TruncationProbe {
+    fn from_tokenizer_bytes(bytes: &[u8]) -> Result<Self, String> {
+        let tokenizer = Tokenizer::from_bytes(bytes)
+            .map_err(|e| format!("the truncation probe's tokenizer did not load: {e}"))?;
+
+        // No accessor exists for the unk token either, so recover it the way
+        // `model2vec_rs`'s private `compute_metadata` does: round-trip the
+        // tokenizer through JSON and read `model.unk_token`.
+        let spec: serde_json::Value = serde_json::to_value(&tokenizer)
+            .map_err(|e| format!("could not inspect the tokenizer for its unk token: {e}"))?;
+        let unk_token_id = spec
+            .get("model")
+            .and_then(|model| model.get("unk_token"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|token| tokenizer.token_to_id(token))
+            .map(|id| id as usize);
+
+        Ok(Self {
+            tokenizer,
+            unk_token_id,
+        })
+    }
+
+    /// True if embedding `text` drops tokens: applying the same
+    /// out-of-vocabulary filter `encode_with_args` applies to the whole string
+    /// leaves more than [`MAX_TOKENS`] ids, so the real call truncates the list
+    /// before pooling.
+    ///
+    /// A `false` for text with no in-vocabulary tokens at all — the empty
+    /// string, whitespace, symbols outside the vocabulary — is correct, not a
+    /// false negative: nothing was discarded, there was simply nothing there.
+    fn truncates(&self, text: &str) -> bool {
+        let Ok(encoding) = self.tokenizer.encode_fast(text, false) else {
+            // A failure here would also fail inside `embed`, which surfaces it
+            // as an ordinary error. This probe backs a SQL predicate rather
+            // than a fallible call, so it degrades to "not observed to
+            // truncate" instead of erroring a scan.
+            return false;
+        };
+
+        let count = match self.unk_token_id {
+            Some(unk) => encoding
+                .get_ids()
+                .iter()
+                .filter(|&&id| id as usize != unk)
+                .count(),
+            None => encoding.get_ids().len(),
+        };
+        count > MAX_TOKENS
+    }
 }
 
 static BUNDLED: OnceLock<Result<Model, String>> = OnceLock::new();
@@ -88,8 +184,14 @@ impl Model {
         }
 
         let key = model_key(TOKENIZER, WEIGHTS, CONFIG);
+        let truncation = TruncationProbe::from_tokenizer_bytes(TOKENIZER)?;
 
-        Ok(Model { inner, dim, key })
+        Ok(Model {
+            inner,
+            dim,
+            key,
+            truncation,
+        })
     }
 
     /// Number of floats in every vector this model returns.
@@ -133,7 +235,25 @@ impl Model {
     /// that fails is recoverable, and a column of zero vectors that looks like
     /// data is not.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        conform(self.inner.encode_single(text), self.dim)
+        let sentence = [text.to_string()];
+        let vector = self
+            .inner
+            .encode_with_args(&sentence, Some(MAX_TOKENS), 1)
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        conform(vector, self.dim)
+    }
+
+    /// Whether embedding `text` discards content: `text` tokenises to more
+    /// than [`MAX_TOKENS`] ids, so [`Model::embed`] truncates the excess before
+    /// pooling and the vector it returns does not reflect all of `text`.
+    ///
+    /// The vector `embed` returns is full width and unit norm whether or not
+    /// this is true — nothing about it says content was dropped, which is the
+    /// whole reason to ask first.
+    pub fn is_truncated(&self, text: &str) -> bool {
+        self.truncation.truncates(text)
     }
 }
 
@@ -276,6 +396,92 @@ mod tests {
                 "expected a zero vector for {text:?}"
             );
         }
+    }
+
+    /// AC3 + AC5: the boundary between "clipped" and "not", pinned in both
+    /// directions with a probe built to actually show truncation.
+    ///
+    /// A text of one repeated token cannot show this: the mean of 512 copies of
+    /// a vector equals the mean of 513 copies of the same vector, so a probe
+    /// like that reports "not clipped" whichever token the encoder happens to
+    /// drop and would pass against a limit of any size, correct or broken. This
+    /// probe is `N` copies of one filler word plus one DISTINCT trailing marker
+    /// word, so whether the marker reached the mean is a fact a byte-equality
+    /// check on the two vectors can actually observe.
+    #[test]
+    fn a_long_text_is_reported_clipped_exactly_where_the_marker_stops_reaching_the_mean() {
+        let model = bundled().expect("the bundled model loads");
+        let filler = |tokens: usize| "steel ".repeat(tokens).trim_end().to_string();
+        let filler_plus_marker = |tokens: usize| {
+            let mut text = "steel ".repeat(tokens);
+            text.push_str("logistics");
+            text
+        };
+
+        // 511 filler tokens + 1 marker = 512 tokens: exactly at the cap, so the
+        // marker is the 512nd token and is still pooled.
+        let at_cap = filler_plus_marker(MAX_TOKENS - 1);
+        assert!(
+            !model.is_truncated(&at_cap),
+            "{} tokens must not report clipped",
+            MAX_TOKENS
+        );
+        assert_ne!(
+            model.embed(&at_cap).expect("embed"),
+            model.embed(&filler(MAX_TOKENS - 1)).expect("embed"),
+            "the marker at position {MAX_TOKENS} must still move the mean"
+        );
+
+        // 512 filler tokens + 1 marker = 513 tokens: one past the cap, so the
+        // marker is truncated away before pooling.
+        let past_cap = filler_plus_marker(MAX_TOKENS);
+        assert!(
+            model.is_truncated(&past_cap),
+            "{} tokens must report clipped",
+            MAX_TOKENS + 1
+        );
+        assert_eq!(
+            model.embed(&past_cap).expect("embed"),
+            model.embed(&filler(MAX_TOKENS)).expect("embed"),
+            "the marker at position {} must have been dropped before pooling",
+            MAX_TOKENS + 1
+        );
+    }
+
+    /// AC4 at the engine: `Model::embed` now calls `encode_with_args` directly
+    /// with this crate's own [`MAX_TOKENS`] rather than model2vec-rs's
+    /// `encode_single` convenience wrapper (which hard-codes its own `512`).
+    /// Pinned against the old call path so that refactor is provably a no-op.
+    #[test]
+    fn embed_matches_the_upstream_convenience_wrapper_it_replaced() {
+        let model = bundled().expect("the bundled model loads");
+        for text in ["", "a foundry casting valve bodies", &"steel ".repeat(600)] {
+            assert_eq!(
+                model.embed(text).expect("embed"),
+                conform(model.inner.encode_single(text), model.dim()).expect("conform"),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// Nothing to average is not clipped: a text with no in-vocabulary tokens
+    /// has nothing dropped, it simply never had anything past the limit.
+    #[test]
+    fn text_with_no_tokens_is_not_reported_clipped() {
+        let model = bundled().expect("the bundled model loads");
+        for text in ["", "   ", "\u{16A0}\u{16A2}\u{16A6}"] {
+            assert!(!model.is_truncated(text), "{text:?}");
+        }
+    }
+
+    /// Ordinary short text is not clipped, and a text built to be many times
+    /// past the cap is — the coarse sanity check either side of the pinned
+    /// boundary above.
+    #[test]
+    fn ordinary_text_is_not_clipped_and_a_much_longer_text_is() {
+        let model = bundled().expect("the bundled model loads");
+        assert!(!model.is_truncated("a manufacturer of industrial fasteners in Sheffield"));
+        assert!(model.is_truncated(&"steel ".repeat(MAX_TOKENS * 3)));
     }
 
     /// The model key is a content address: flipping one byte of any of the three
