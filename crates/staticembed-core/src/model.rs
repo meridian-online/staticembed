@@ -20,7 +20,8 @@ pub const MODEL_REVISION: &str = "bf8b056651a2c21b8d2565580b8569da283cab23";
 /// SHA-256 of `models/potion-base-8M/model.safetensors` as published.
 pub const WEIGHTS_SHA256: &str = "f65d0f325faadc1e121c319e2faa41170d3fa07d8c89abd48ca5358d9a223de2";
 /// SHA-256 of `models/potion-base-8M/tokenizer.json` as published.
-pub const TOKENIZER_SHA256: &str = "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50";
+pub const TOKENIZER_SHA256: &str =
+    "e67e803f624fb4d67dea1c730d06e1067e1b14d830e2c2202569e3ef0f70bb50";
 /// SHA-256 of `models/potion-base-8M/config.json` as published.
 pub const CONFIG_SHA256: &str = "2a6ac0e9aaa356a68a5688070db78fc3a464fefe85d2f06a1905ce3718687553";
 
@@ -46,7 +47,7 @@ static BUNDLED: OnceLock<Result<Model, String>> = OnceLock::new();
 /// Loading is a parse of the embedded bytes — no filesystem lookup, no network,
 /// no environment variable, and no configuration a caller has to supply.
 pub fn bundled() -> Result<&'static Model, &'static str> {
-    match BUNDLED.get_or_init(|| Model::from_embedded_bytes()) {
+    match BUNDLED.get_or_init(Model::from_embedded_bytes) {
         Ok(model) => Ok(model),
         Err(message) => Err(message.as_str()),
     }
@@ -202,7 +203,16 @@ mod tests {
     #[test]
     fn text_with_no_tokens_gets_a_zero_vector_of_full_width() {
         let model = bundled().expect("the bundled model loads");
-        for text in ["", " ", "\t\n  "] {
+        // The last two are runic and alchemical characters: the vocabulary this
+        // model was built on does not carry them, so the tokenizer produces only
+        // unknown tokens and there is nothing to average.
+        for text in [
+            "",
+            " ",
+            "\t\n  ",
+            "\u{16A0}\u{16A2}\u{16A6}",
+            "\u{1F701}\u{1F702}\u{1F703}",
+        ] {
             let vector = model.embed(text);
             assert_eq!(vector.len(), model.dim(), "width for {text:?}");
             assert!(

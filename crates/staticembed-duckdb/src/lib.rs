@@ -33,11 +33,11 @@ use std::error::Error;
 use std::ffi::CString;
 use std::sync::Arc;
 
-use duckdb::Result;
 use duckdb::core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId};
 use duckdb::types::DuckString;
 use duckdb::vscalar::{ScalarFunctionSignature, VScalar};
 use duckdb::vtab::arrow::WritableVector;
+use duckdb::Result;
 use libduckdb_sys::duckdb_string_t;
 
 /// The stable C API floor this artifact declares, so one build stays loadable
@@ -214,12 +214,10 @@ impl VScalar for CacheStats {
     }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
-        let bigint = LogicalTypeHandle::from(LogicalTypeId::Bigint);
         let fields: Vec<(&str, LogicalTypeHandle)> = STATS_FIELDS
             .iter()
             .map(|name| (*name, LogicalTypeHandle::from(LogicalTypeId::Bigint)))
             .collect();
-        drop(bigint);
         vec![ScalarFunctionSignature::exact(
             vec![],
             LogicalTypeHandle::struct_type(&fields),
@@ -288,7 +286,8 @@ pub unsafe fn init_extension(
     info: duckdb::ffi::duckdb_extension_info,
     access: *const duckdb::ffi::duckdb_extension_access,
 ) -> std::result::Result<bool, Box<dyn Error>> {
-    let have_api_struct = duckdb::ffi::duckdb_rs_extension_api_init(info, access, MIN_DUCKDB_VERSION)?;
+    let have_api_struct =
+        duckdb::ffi::duckdb_rs_extension_api_init(info, access, MIN_DUCKDB_VERSION)?;
     if !have_api_struct {
         // The API version did not match; DuckDB already knows why.
         return Ok(false);

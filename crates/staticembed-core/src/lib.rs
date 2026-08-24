@@ -33,11 +33,14 @@ static ENCODED: AtomicU64 = AtomicU64::new(0);
 static CACHE: OnceLock<Mutex<EmbeddingCache>> = OnceLock::new();
 
 fn cache() -> MutexGuard<'static, EmbeddingCache> {
-    let cache = CACHE.get_or_init(|| Mutex::new(EmbeddingCache::with_capacity(cache::DEFAULT_CAPACITY)));
+    let cache =
+        CACHE.get_or_init(|| Mutex::new(EmbeddingCache::with_capacity(cache::DEFAULT_CAPACITY)));
     // A panic inside the extension would otherwise poison the cache for the rest
     // of the session; the data behind the lock is a cache, so recovering it is
     // always safe.
-    cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Everything SQL can observe about the cache.
@@ -137,7 +140,9 @@ mod tests {
     static SERIAL: Mutex<()> = Mutex::new(());
 
     fn serial() -> MutexGuard<'static, ()> {
-        SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// AC4, at the engine: asking for the same text again does not re-embed.
@@ -203,7 +208,11 @@ mod tests {
         let _guard = serial();
         let width = dim().expect("dim");
         for text in ["", "one", "a longer sentence about steel stockholders"] {
-            assert_eq!(embed(text).expect("embed").len(), width, "width for {text:?}");
+            assert_eq!(
+                embed(text).expect("embed").len(),
+                width,
+                "width for {text:?}"
+            );
         }
     }
 
