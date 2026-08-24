@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -278,18 +279,41 @@ def restore(mutation: Mutation) -> None:
     run(["git", "checkout", "--", mutation.file])
 
 
+#: `test result: ok. 3 passed; 0 failed; ...`
+TEST_RESULT = re.compile(r"test result: \w+\. (\d+) passed; (\d+) failed;")
+
+
+class RanNothing(Exception):
+    """The command under a mutation executed no test at all.
+
+    This is neither a kill nor a survival, and counting it as either is how a
+    mutation harness comes to report a clean sweep having checked nothing. It
+    happened here on the first run: `cargo test NAME -- --exact` matches no test,
+    because the names are module-qualified, so every Rust mutation "survived"
+    against 0 tests run.
+    """
+
+
 def rust_test_failed(test_name: str) -> tuple[bool, str]:
-    completed = run(["cargo", "test", "--workspace", test_name, "--", "--exact", "--nocapture"])
+    # No `--exact`: the tests live in a `tests` module, so the bare function
+    # name is a substring of the full path rather than equal to it.
+    completed = run(["cargo", "test", "--workspace", test_name, "--", "--nocapture"])
     output = completed.stdout + completed.stderr
+
+    executed = sum(int(passed) + int(failed) for passed, failed in TEST_RESULT.findall(output))
+    if executed == 0 and "error" not in output:
+        raise RanNothing(f"`cargo test {test_name}` matched no test")
+
     if completed.returncode == 0:
         return False, output
-    return f"{test_name} ... FAILED" in output or f"{test_name}' panicked" in output or "test result: FAILED" in output, output
+    return f"{test_name} ... FAILED" in output or "test result: FAILED" in output, output
 
 
 def sql_test_failed(name_fragment: str, duckdb: str) -> tuple[bool, str]:
     built = run(["make", "extension"])
     if built.returncode != 0:
-        return False, built.stdout + built.stderr
+        # A mutation that does not compile is not evidence about a test.
+        raise RanNothing(f"the mutated tree did not build:\n{built.stdout}{built.stderr}")
     completed = run(
         [
             sys.executable,
@@ -303,6 +327,10 @@ def sql_test_failed(name_fragment: str, duckdb: str) -> tuple[bool, str]:
         ]
     )
     output = completed.stdout + completed.stderr
+    if completed.returncode == 2:
+        raise RanNothing(f"--only {name_fragment!r} matched no SQL test file")
+    if "PASS " not in output and "FAIL " not in output:
+        raise RanNothing(f"the SQL runner reported no result for {name_fragment!r}")
     return completed.returncode == 1 and "FAIL " in output, output
 
 
@@ -340,6 +368,10 @@ def main() -> int:
                 reddened, output = rust_test_failed(mutation.expect_red)
             else:
                 reddened, output = sql_test_failed(mutation.expect_red, args.duckdb)
+        except RanNothing as ran_nothing:
+            restore(mutation)
+            print(f"BROKEN   {mutation.name}: {ran_nothing}", file=sys.stderr)
+            return 2
         finally:
             restore(mutation)
 
