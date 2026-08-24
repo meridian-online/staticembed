@@ -158,6 +158,12 @@ impl EmbeddingCache {
     ///
     /// Returns whether it was stored. A full cache declines rather than
     /// evicting; see the module docs for why.
+    ///
+    /// The full-cache branch here is an invariant guard on a public method, not
+    /// the production path: [`crate::embed`] tests [`Self::is_full`] itself and
+    /// never reaches this when the answer is yes, because it also has to decide
+    /// whether to take a flight. Mutating this branch leaves the SQL suite
+    /// green, which is how that was established.
     pub fn insert(&mut self, key: CacheKey, vector: Arc<[f32]>) -> bool {
         if self.is_full() && !self.entries.contains_key(&key) {
             self.uncached += 1;

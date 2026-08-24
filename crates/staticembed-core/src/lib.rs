@@ -155,6 +155,12 @@ pub fn embed(text: &str) -> Result<Arc<[f32]>, String> {
     // already encoding the same key, and reached `Flight::begin` after that
     // thread released it, never waits at all. Rechecking only after a wait left
     // 454 encodes for 400 distinct values across eight threads.
+    //
+    // The two do different jobs and both are needed. This recheck is what makes
+    // the count right as DuckDB drives it — ten values over 400,000 rows at
+    // eight threads give ten encodes with the recheck and no flight. The flight
+    // is what makes it right under contention: the same ten values in a tight
+    // eight-thread loop give 49 to 65 encodes without it.
     if let Some(vector) = cache().recheck(&key) {
         return Ok(vector);
     }

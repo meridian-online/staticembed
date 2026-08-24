@@ -166,50 +166,141 @@ MUTATIONS: list[Mutation] = [
         old="    hasher.update(text.as_bytes());",
         new="    hasher.update(text.trim().to_lowercase().as_bytes());",
         expect_red="the_cache_key_uses_the_exact_input_bytes",
+        also_reddens=["inputs_that_embed_alike_still_occupy_separate_cache_entries"],
     ),
     Mutation(
-        name="the_cache_never_rolls_a_generation",
+        name="the_cache_never_stops_growing",
         file=f"{CORE}/cache.rs",
-        old="        if self.hot.len() >= self.capacity && !self.hot.contains_key(&key) {",
-        new="        if false && self.hot.len() >= self.capacity && !self.hot.contains_key(&key) {",
-        expect_red="bounded_cache_never_exceeds_two_generations",
+        old="        if self.is_full() && !self.entries.contains_key(&key) {\n            self.uncached += 1;\n            return false;\n        }",
+        new="",
+        expect_red="the_cache_never_holds_more_than_its_capacity",
+        also_reddens=["a_full_cache_declines_and_says_how_often"],
+    ),
+    # The policy this replaced. A full cache that throws everything away and
+    # starts again is the two-generation roll in one line, and it is what took
+    # a repeated scan of 33,000 distinct values to a zero per-cent hit rate.
+    Mutation(
+        name="a_full_cache_evicts_instead_of_declining",
+        file=f"{CORE}/cache.rs",
+        old="        if self.is_full() && !self.entries.contains_key(&key) {\n            self.uncached += 1;\n            return false;\n        }",
+        new="        if self.is_full() && !self.entries.contains_key(&key) {\n            self.entries.clear();\n        }",
+        expect_red="a_repeated_scan_larger_than_the_cache_still_hits_for_a_full_cache_worth",
+        also_reddens=["a_rescan_larger_than_the_cache_is_served_for_a_full_cache_worth"],
+    ),
+    # The branch `embed` actually takes when the cache is full. The guard inside
+    # `insert` never runs in production, because `embed` short-circuits before
+    # reaching it — so mutating `insert` leaves SQL green and says nothing.
+    Mutation(
+        name="a_full_cache_evicts_instead_of_declining_seen_from_sql",
+        file=f"{CORE}/lib.rs",
+        old="            cache.note_uncached();\n            drop(cache);\n            return encode(model, text);",
+        new="            cache.clear();",
+        expect_red="07_at_the_scale",
+        kind="sql",
     ),
     Mutation(
-        name="a_lookup_never_consults_the_older_generation",
+        name="a_declined_value_is_not_counted",
         file=f"{CORE}/cache.rs",
-        old="        if let Some(vector) = self.cold.remove(key) {",
-        new="        if let Some(vector) = None::<Arc<[f32]>> {",
-        expect_red="a_repeatedly_requested_key_is_promoted_out_of_the_older_generation",
+        old="            self.uncached += 1;\n            return false;",
+        new="            return false;",
+        expect_red="a_full_cache_declines_and_says_how_often",
     ),
     Mutation(
         name="a_hit_is_not_counted",
         file=f"{CORE}/cache.rs",
-        old="        if let Some(vector) = self.hot.get(key) {\n            self.hits += 1;",
-        new="        if let Some(vector) = self.hot.get(key) {",
+        old="            Some(vector) => {\n                self.hits += 1;",
+        new="            Some(vector) => {",
         expect_red="a_hit_returns_the_stored_vector_and_counts_as_a_hit",
     ),
     Mutation(
         name="a_miss_is_not_counted",
         file=f"{CORE}/cache.rs",
-        old="        self.misses += 1;\n        None",
-        new="        None",
+        old="            None => {\n                self.misses += 1;\n                None\n            }",
+        new="            None => None,",
         expect_red="a_miss_is_counted_and_stores_nothing",
+    ),
+    Mutation(
+        name="a_recheck_leaves_the_stale_miss_standing",
+        file=f"{CORE}/cache.rs",
+        old="        self.misses = self.misses.saturating_sub(1);\n        self.hits += 1;",
+        new="",
+        expect_red="a_successful_recheck_corrects_the_stale_miss_it_follows",
+    ),
+    Mutation(
+        name="a_recheck_moves_the_counters_before_it_knows_the_answer",
+        file=f"{CORE}/cache.rs",
+        old="        let vector = self.entries.get(key).map(Arc::clone)?;\n        self.misses = self.misses.saturating_sub(1);\n        self.hits += 1;",
+        new="        self.misses = self.misses.saturating_sub(1);\n        self.hits += 1;\n        let vector = self.entries.get(key).map(Arc::clone)?;",
+        expect_red="a_failed_recheck_leaves_the_counters_alone",
     ),
     Mutation(
         name="clearing_leaves_the_counters_where_they_were",
         file=f"{CORE}/cache.rs",
-        old="        self.hot.clear();\n        self.cold.clear();\n        self.hits = 0;\n        self.misses = 0;",
-        new="        self.hot.clear();\n        self.cold.clear();",
+        old="        self.hits = 0;\n        self.misses = 0;\n        self.uncached = 0;",
+        new="",
         expect_red="clear_reports_what_it_dropped_and_resets_the_counters",
     ),
-    # ── the engine's public behaviour ────────────────────────────────────────
+    # ── the memory budget, which nothing pinned before ───────────────────────
+    # Setting the old fixed DEFAULT_CAPACITY to 4 left the whole suite green.
     Mutation(
-        name="the_cache_is_never_consulted",
-        file=f"{CORE}/lib.rs",
-        old="    if let Some(vector) = cache().get(&key) {\n        return Ok(vector);\n    }",
-        new="    if let Some(vector) = cache().get(&key) {\n        let _ = vector;\n    }",
+        name="the_cache_budget_is_cut_to_a_few_kilobytes",
+        file=f"{CORE}/cache.rs",
+        old="pub const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;",
+        new="pub const DEFAULT_BUDGET_BYTES: usize = 4 * 1024;",
+        expect_red="the_default_budget_holds_at_least_fifty_thousand_vectors",
+        also_reddens=[
+            "a_repeated_query_over_fifty_thousand_distinct_values_re_embeds_none_of_them"
+        ],
+    ),
+    Mutation(
+        name="the_cache_budget_is_cut_to_a_few_kilobytes_seen_from_sql",
+        file=f"{CORE}/cache.rs",
+        old="pub const DEFAULT_BUDGET_BYTES: usize = 64 * 1024 * 1024;",
+        new="pub const DEFAULT_BUDGET_BYTES: usize = 4 * 1024;",
+        expect_red="07_at_the_scale",
+        kind="sql",
+    ),
+    Mutation(
+        name="the_budget_is_divided_by_the_vector_alone_ignoring_the_key_and_the_map",
+        file=f"{CORE}/cache.rs",
+        old="    (budget_bytes / entry_bytes(dim)).max(1)",
+        new="    (budget_bytes / (dim * std::mem::size_of::<f32>())).max(1)",
+        expect_red="the_capacity_is_the_largest_entry_count_that_fits_the_budget",
+    ),
+    Mutation(
+        name="a_budget_smaller_than_one_vector_yields_a_cache_that_holds_nothing",
+        file=f"{CORE}/cache.rs",
+        old="    (budget_bytes / entry_bytes(dim)).max(1)",
+        new="    budget_bytes / entry_bytes(dim)",
+        expect_red="a_budget_too_small_for_one_vector_still_gives_a_usable_cache",
+    ),
+    Mutation(
+        name="the_capacity_is_silently_capped",
+        file=f"{CORE}/cache.rs",
+        old="    (budget_bytes / entry_bytes(dim)).max(1)",
+        new="    (budget_bytes / entry_bytes(dim)).max(1).min(40_000)",
+        expect_red="halving_the_budget_roughly_halves_the_capacity",
+        also_reddens=["the_default_budget_holds_at_least_fifty_thousand_vectors"],
+    ),
+    Mutation(
+        name="an_entry_costs_the_same_whatever_the_model_width",
+        file=f"{CORE}/cache.rs",
+        old="    inline_with_slack + ARC_COUNTS + dim * std::mem::size_of::<f32>()",
+        new="    inline_with_slack + ARC_COUNTS + 256 * std::mem::size_of::<f32>()",
+        expect_red="a_wider_model_gets_fewer_entries_from_the_same_budget",
+        also_reddens=["the_capacity_is_the_largest_entry_count_that_fits_the_budget"],
+    ),
+    # ── the engine's public behaviour ────────────────────────────────────────
+    # Not "the first lookup is skipped": that is a fast path, and `recheck`
+    # answers the same question a few lines later, so removing it changes no
+    # behaviour and reddens nothing. What is a defect is never storing.
+    Mutation(
+        name="the_cache_never_stores_anything",
+        file=f"{CORE}/cache.rs",
+        old="        self.entries.insert(key, vector);\n        true",
+        new="        let _ = vector;\n        true",
         expect_red="repeating_a_value_does_not_re_embed_it",
-        also_reddens=["inputs_that_embed_alike_still_occupy_separate_cache_entries"],
+        also_reddens=["a_hit_returns_the_stored_vector_and_counts_as_a_hit"],
     ),
     Mutation(
         name="the_cache_stores_a_zero_vector_instead_of_the_real_one",
@@ -231,6 +322,47 @@ MUTATIONS: list[Mutation] = [
         old='            "staticembed {} (model {}@{}, key {}, dim {})",\n            VERSION,\n            model::MODEL_ID,',
         new='            "staticembed {} (model {}@{}, key {}, dim {})",\n            VERSION,\n            "a model",',
         expect_red="describe_names_the_bundled_model_and_the_width",
+    ),
+    # ── one encode per distinct value, under threads ─────────────────────────
+    # Pinned in Rust rather than through DuckDB, and the measurement says why.
+    # Eight threads in a tight loop over ten values gave 49-65 encodes instead
+    # of 10 in ten runs out of ten with the flight removed. The same shape
+    # through DuckDB at eight threads gave 12 instead of 10, and only sometimes:
+    # DuckDB hands the first chunk to one thread, which warms the cache before
+    # the others engage. `recheck` alone is enough to make the DuckDB-visible
+    # count right; the flight is what makes it right under contention, and only
+    # a test that creates contention can pin it.
+    Mutation(
+        name="two_threads_on_one_value_both_encode_it",
+        file=f"{CORE}/lib.rs",
+        old="    let _flight = Flight::begin(key);",
+        new="",
+        expect_red="eight_threads_over_ten_values_encode_ten_times",
+        also_reddens=["eight_threads_over_distinct_values_each_get_the_right_vector"],
+    ),
+    Mutation(
+        name="a_thread_that_took_the_flight_does_not_look_again",
+        file=f"{CORE}/lib.rs",
+        old="    if let Some(vector) = cache().recheck(&key) {\n        return Ok(vector);\n    }",
+        new="",
+        expect_red="09_the_encode_count_is_exact",
+        kind="sql",
+    ),
+    Mutation(
+        name="a_full_cache_still_queues_every_caller_behind_one_flight",
+        file=f"{CORE}/lib.rs",
+        old="            cache.note_uncached();",
+        new="",
+        expect_red="a_column_larger_than_the_cache_reports_what_it_could_not_hold",
+        also_reddens=["a_value_the_full_cache_turned_away_is_re_embedded_every_time"],
+    ),
+    Mutation(
+        name="the_uncached_count_is_not_reported_to_sql",
+        file=GLUE,
+        old="            stats.uncached,\n            stats.entries,",
+        new="            stats.entries,\n            stats.uncached,",
+        expect_red="07_at_the_scale",
+        kind="sql",
     ),
     # ── the DuckDB surface ───────────────────────────────────────────────────
     Mutation(
@@ -296,6 +428,23 @@ MUTATIONS: list[Mutation] = [
             "        )"
         ),
         expect_red="06_text_the_tokenizer",
+        kind="sql",
+    ),
+    # A running offset that is not reset between chunks. Invisible over the five
+    # rows every other output-shape assertion uses, because five rows are one
+    # chunk; fatal across three.
+    Mutation(
+        name="the_list_offset_is_carried_across_chunks",
+        file=GLUE,
+        old="    let mut offset = 0usize;\n    for (row, entry) in rows.iter().enumerate() {",
+        new=(
+            "    static CARRIED: std::sync::atomic::AtomicUsize =\n"
+            "        std::sync::atomic::AtomicUsize::new(0);\n"
+            "    let mut offset = CARRIED.load(std::sync::atomic::Ordering::Relaxed);\n"
+            "    CARRIED.store(offset + total, std::sync::atomic::Ordering::Relaxed);\n"
+            "    for (row, entry) in rows.iter().enumerate() {"
+        ),
+        expect_red="08_a_scan_wider_than_one_chunk",
         kind="sql",
     ),
     Mutation(
