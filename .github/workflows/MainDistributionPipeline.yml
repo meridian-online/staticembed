@@ -147,7 +147,7 @@ jobs:
             --artifact downloaded/staticembed.duckdb_extension \
             --expect-platform ${{ matrix.duckdb_arch }}
 
-      # AC1. Everything above reads the file. None of it runs it, and a binary
+      # Everything above reads the file. None of it runs it, and a binary
       # can carry a matching trailer, import no sockets, export the right
       # symbols and still refuse to LOAD. Nothing else in the pipeline asks:
       # base.Makefile sets SKIP_TESTS for linux_amd64 and inside the Linux
