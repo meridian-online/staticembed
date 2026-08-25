@@ -39,8 +39,9 @@ const CONFIG: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json
 /// [`Model::is_truncated`] for how a caller finds out.
 ///
 /// This is `model2vec_rs::StaticModel::encode`'s own default, `Some(512)`,
-/// declared here so this crate has exactly one place that says "512" and so
-/// that moving it moves `embed` as well as the predicate.
+/// declared here so that moving it moves `embed` as well as the predicate —
+/// which `embed_is_byte_identical_to_the_upstream_wrapper_it_replaced` pins in
+/// both directions.
 pub const MAX_TOKENS: usize = 512;
 
 /// Domain tag mixed into the model key so the digest cannot be confused with a
@@ -738,10 +739,10 @@ mod tests {
                 true,
                 true,
             ),
-            // 3500 characters, none of them a token this vocabulary carries:
-            // 2000 raw ids, all of them the unknown-token id, and 0 that reach
-            // the mean. The character cut fires and takes 428 characters with
-            // it, and not one id the mean would have seen.
+            // 3500 characters, none of them a token this vocabulary carries,
+            // so every raw id is the unknown-token id and none reaches the
+            // mean. The character cut fires and takes 428 characters with it,
+            // and not one id the mean would have seen.
             probe(
                 "cjk outside the vocabulary, past the character cut",
                 "工業製品 ".repeat(700),
