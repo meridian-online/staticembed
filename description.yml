@@ -5,10 +5,13 @@
 ## repository at `repo.ref` for every platform in the matrix and publish the
 ## binaries, after which `INSTALL staticembed FROM community` works for anyone.
 ##
-## `repo.ref` must name the commit that carries the build contract in `Makefile`
-## and the `extension-ci-tools` submodule. `scripts/check_description_examples.py`
-## checks the shape of that ref and, when the object is in the local repository,
-## that its tree really carries the contract.
+## `repo.ref` MUST BE REPOINTED before this is submitted. It has to name a commit
+## that carries the build contract in `Makefile` and the `extension-ci-tools`
+## submodule, and the value below does not — it is the tip of `main` as it stood
+## when this entry was written. `scripts/check_description_examples.py` asserts
+## only that the ref is a full 40-character SHA, because a check that the commit
+## carries the contract would go quiet in any clone that no longer has the
+## object, which is the shape of check this repository keeps deleting.
 ##
 ## `build:` and `language:` are labels for the extension's page — the registry's
 ## `scripts/build.py` reads neither. The recipe that actually runs is `make
