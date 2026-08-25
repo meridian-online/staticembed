@@ -2,3 +2,7 @@
 *.duckdb_extension
 __pycache__/
 *.pyc
+
+# The extension-ci-tools recipe generates configure/ and assumes it is NOT tracked:
+# a tracked extension_version.txt is never refreshed and stamps a stale version.
+/configure/
