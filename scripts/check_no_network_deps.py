@@ -29,6 +29,13 @@ UNDEFINED SYMBOLS
     What neither covers: raw syscall instructions that bypass libSystem, and a
     `dlopen` of a library named at runtime. Nothing in this tree does either.
 
+    ON WINDOWS there is no `nm`, and both questions are answered by one
+    structure: the PE import table names the DLLs the binary needs and the
+    functions it takes from each. `pe_imports` reads it out of the file with no
+    external tool, and the answers feed the same two checks — Winsock spells its
+    entry points `connect`, `send`, `recv`, `getaddrinfo`, so the symbol list
+    below already covers it unchanged.
+
 RUNTIME DEPENDENCY TREE
     `cargo tree --workspace --edges normal` is the set of crates compiled into
     the artifact. Build-dependencies are deliberately excluded: `libduckdb-sys`
@@ -55,8 +62,10 @@ import argparse
 import pathlib
 import re
 import shutil
+import struct
 import subprocess
 import sys
+import tempfile
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -82,8 +91,19 @@ FORBIDDEN_CRATES = (
     "tokio",
 )
 
-# Dynamic library names that mean a TLS or HTTP stack was linked.
-FORBIDDEN_LIBRARY_PATTERN = re.compile(r"lib(ssl|crypto|curl|nghttp2)", re.IGNORECASE)
+# Dynamic library names that mean a TLS or HTTP stack was linked. The first
+# alternative is the unix spelling; the second is the Windows one, where the
+# stack is a system DLL rather than a vendored library — `secur32` and
+# `crypt32` are schannel TLS and the certificate store, which is what a Windows
+# HTTPS client pulls in. `bcrypt`, `bcryptprimitives` and `advapi32` are
+# deliberately absent: they are where a Rust binary gets its random numbers,
+# and flagging them would fail every build.
+FORBIDDEN_LIBRARY_PATTERN = re.compile(
+    r"lib(ssl|crypto|curl|nghttp2)"
+    r"|\b(ws2_32|wsock32|mswsock|winhttp|wininet|dnsapi|iphlpapi|secur32"
+    r"|sspicli|schannel|ncrypt|crypt32|urlmon|netapi32|websocket)\.dll",
+    re.IGNORECASE,
+)
 
 # Entry points to the platform's socket API. A binary that can reach the network
 # calls at least one of these, so their joint absence from the undefined symbol
@@ -130,6 +150,26 @@ FORBIDDEN_SYMBOLS = (
     "nw_connection_create",
     "nw_connection_start",
     "nw_endpoint_create_host",
+    # Winsock. The BSD names above are imported under those exact spellings from
+    # ws2_32.dll, so these are the ones that have no unix equivalent.
+    "WSAStartup",
+    "WSASocketA",
+    "WSASocketW",
+    "WSAConnect",
+    "WSASend",
+    "WSASendTo",
+    "WSARecv",
+    "WSARecvFrom",
+    "WSAAccept",
+    "WSAAddressToStringW",
+    "GetAddrInfoW",
+    "InternetOpenA",
+    "InternetOpenW",
+    "InternetConnectA",
+    "InternetConnectW",
+    "WinHttpOpen",
+    "WinHttpConnect",
+    "WinHttpSendRequest",
 )
 
 # `name vX.Y.Z` is how every cargo tree line names a crate.
@@ -157,6 +197,130 @@ def runtime_tree() -> str:
     return completed.stdout
 
 
+class UninspectableArtifact(Exception):
+    """The artifact could not be read, so nothing about it has been established."""
+
+
+# ── Windows: the PE import table ──────────────────────────────────────────────
+#
+# `nm`, `otool` and `ldd` are all absent on a Windows runner, and a check that
+# reports SKIPPED there would leave the one platform whose toolchain nobody has
+# looked at as the one platform nobody has looked at. The import table answers
+# both questions this file asks, so it is read directly. Stdlib `struct`, no
+# external tool, and the format is fixed by the PE specification rather than by
+# a tool's output.
+
+PE_SIGNATURE = b"PE\0\0"
+PE32_MAGIC = 0x10B
+PE32PLUS_MAGIC = 0x20B
+IMPORT_DIRECTORY = 1
+DELAY_IMPORT_DIRECTORY = 13
+
+
+def looks_like_pe(artifact: pathlib.Path) -> bool:
+    with artifact.open("rb") as handle:
+        return handle.read(2) == b"MZ"
+
+
+def _c_string(data: bytes, offset: int) -> str:
+    end = data.index(b"\0", offset)
+    return data[offset:end].decode("ascii", errors="replace")
+
+
+def pe_imports(artifact: pathlib.Path) -> tuple[list[str], list[str]]:
+    """(DLL names, imported function names) from a PE image.
+
+    Raises UninspectableArtifact rather than returning empty lists: a parser
+    that gave up quietly would report a clean import table for a file it never
+    read, and clean is exactly the answer this check must not invent.
+
+    The packaged extension carries DuckDB's 534-byte metadata trailer after the
+    image, which is past everything read here and does not disturb it.
+    """
+    data = artifact.read_bytes()
+    try:
+        if data[:2] != b"MZ":
+            raise UninspectableArtifact(f"{artifact} does not start with the MZ signature")
+        pe = struct.unpack_from("<I", data, 0x3C)[0]
+        if data[pe : pe + 4] != PE_SIGNATURE:
+            raise UninspectableArtifact(f"{artifact} has no PE header at {pe:#x}")
+
+        sections_count, optional_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from("<H", data, pe + 20)[0]
+        optional = pe + 24
+        magic = struct.unpack_from("<H", data, optional)[0]
+        if magic not in (PE32_MAGIC, PE32PLUS_MAGIC):
+            raise UninspectableArtifact(f"{artifact} has an unknown optional-header magic {magic:#x}")
+        plus = magic == PE32PLUS_MAGIC
+        directories = optional + (112 if plus else 96)
+
+        sections = []
+        section_table = pe + 24 + optional_size
+        for index in range(sections_count):
+            base = section_table + index * 40
+            virtual_size, virtual_address, raw_size, raw_pointer = struct.unpack_from("<IIII", data, base + 8)
+            sections.append((virtual_address, max(virtual_size, raw_size), raw_pointer))
+        if not sections:
+            raise UninspectableArtifact(f"{artifact} has no sections")
+
+        def offset_of(rva: int) -> int | None:
+            for virtual_address, span, raw_pointer in sections:
+                if virtual_address <= rva < virtual_address + span:
+                    return rva - virtual_address + raw_pointer
+            return None
+
+        thunk_size = 8 if plus else 4
+        thunk_format = "<Q" if plus else "<I"
+        ordinal_flag = 1 << (63 if plus else 31)
+
+        libraries: list[str] = []
+        functions: list[str] = []
+
+        for directory in (IMPORT_DIRECTORY, DELAY_IMPORT_DIRECTORY):
+            table_rva, table_size = struct.unpack_from("<II", data, directories + directory * 8)
+            if not table_rva or not table_size:
+                continue
+            table = offset_of(table_rva)
+            if table is None:
+                raise UninspectableArtifact(f"{artifact}: import table RVA {table_rva:#x} is in no section")
+            # The delay-import descriptor is 32 bytes and its name/thunk fields
+            # sit at different offsets from the 20-byte import descriptor.
+            stride, name_at, lookup_at, address_at = (20, 12, 0, 16) if directory == IMPORT_DIRECTORY else (32, 4, 16, 12)
+            entry = 0
+            while True:
+                base = table + entry * stride
+                if base + stride > len(data):
+                    raise UninspectableArtifact(f"{artifact}: the import table runs past the end of the file")
+                fields = data[base : base + stride]
+                if not any(fields):
+                    break
+                name_rva = struct.unpack_from("<I", data, base + name_at)[0]
+                lookup_rva = struct.unpack_from("<I", data, base + lookup_at)[0]
+                address_rva = struct.unpack_from("<I", data, base + address_at)[0]
+                name_offset = offset_of(name_rva)
+                if name_offset is None:
+                    raise UninspectableArtifact(f"{artifact}: a DLL name RVA {name_rva:#x} is in no section")
+                libraries.append(_c_string(data, name_offset))
+
+                thunks = offset_of(lookup_rva or address_rva)
+                slot = 0
+                while thunks is not None:
+                    value = struct.unpack_from(thunk_format, data, thunks + slot * thunk_size)[0]
+                    if value == 0:
+                        break
+                    if not value & ordinal_flag:
+                        hint = offset_of(value & 0x7FFFFFFF)
+                        if hint is not None:
+                            functions.append(_c_string(data, hint + 2))
+                    slot += 1
+                entry += 1
+    except UninspectableArtifact:
+        raise
+    except (struct.error, IndexError, ValueError) as error:
+        raise UninspectableArtifact(f"{artifact} is not a readable PE image: {error}") from error
+
+    return libraries, functions
+
+
 def parse_nm_output(text: str) -> list[str]:
     """Bare symbol names from `nm` output.
 
@@ -181,7 +345,13 @@ def parse_nm_output(text: str) -> list[str]:
 
 
 def undefined_symbols(artifact: pathlib.Path) -> list[str] | None:
-    """The artifact's undefined symbols, one bare name per entry."""
+    """The artifact's undefined symbols, one bare name per entry.
+
+    None means "not established", which is a different answer from an empty
+    list and is why --require-inspection exists.
+    """
+    if looks_like_pe(artifact):
+        return pe_imports(artifact)[1]
     if not shutil.which("nm"):
         return None
     for arguments in (["-u"], ["-D", "-u"], ["--dynamic", "--undefined-only"]):
@@ -207,6 +377,8 @@ def offending_symbols(names: list[str]) -> set[str]:
 
 
 def linked_libraries(artifact: pathlib.Path) -> list[str] | None:
+    if looks_like_pe(artifact):
+        return pe_imports(artifact)[0]
     if shutil.which("otool"):
         command = ["otool", "-L", str(artifact)]
     elif shutil.which("ldd"):
@@ -217,6 +389,60 @@ def linked_libraries(artifact: pathlib.Path) -> list[str] | None:
     if completed.returncode != 0:
         raise SystemExit(f"{command[0]} failed:\n{completed.stdout}{completed.stderr}")
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def synthetic_pe(path: pathlib.Path, imports: dict[str, list[str]], *, plus: bool = True) -> pathlib.Path:
+    """A PE image importing exactly `imports`, for the self-test to read back.
+
+    Assembled here from the format rather than taken from a real binary: the
+    self-test has to run offline and on a machine with no Windows toolchain, and
+    a planted import is the only way to require the reader to report one.
+    """
+    magic = PE32PLUS_MAGIC if plus else PE32_MAGIC
+    thunk_size = 8 if plus else 4
+    thunk_format = "<Q" if plus else "<I"
+    section_rva, section_raw = 0x1000, 0x400
+
+    descriptors_size = (len(imports) + 1) * 20
+    body = bytearray()
+
+    def place(blob: bytes) -> int:
+        """Append to the section body and return the RVA it landed at."""
+        rva = section_rva + descriptors_size + len(body)
+        body.extend(blob)
+        return rva
+
+    descriptors = bytearray()
+    for library, functions in imports.items():
+        hint_rvas = [place(b"\x00\x00" + name.encode("ascii") + b"\x00") for name in functions]
+        lookup_rva = place(
+            b"".join(struct.pack(thunk_format, rva) for rva in hint_rvas)
+            + struct.pack(thunk_format, 0)
+        )
+        name_rva = place(library.encode("ascii") + b"\x00")
+        descriptors += struct.pack("<IIIII", lookup_rva, 0, 0, name_rva, lookup_rva)
+    descriptors += b"\x00" * 20
+
+    section = bytes(descriptors) + bytes(body)
+
+    optional_size = (112 if plus else 96) + 16 * 8
+    headers = bytearray(b"MZ" + b"\x00" * 0x3E)
+    headers[0x3C:0x40] = struct.pack("<I", 0x40)
+    headers += PE_SIGNATURE
+    headers += struct.pack("<HHIIIHH", 0x8664 if plus else 0x14C, 1, 0, 0, 0, optional_size, 0x2102)
+    optional = bytearray(b"\x00" * optional_size)
+    struct.pack_into("<H", optional, 0, magic)
+    struct.pack_into("<I", optional, 108 if plus else 92, 16)
+    struct.pack_into("<II", optional, (112 if plus else 96) + IMPORT_DIRECTORY * 8, section_rva, descriptors_size)
+    headers += optional
+    headers += (
+        b".rdata\x00\x00"
+        + struct.pack("<IIII", len(section), section_rva, len(section), section_raw)
+        + b"\x00" * 16
+    )
+    headers += b"\x00" * (section_raw - len(headers))
+    path.write_bytes(bytes(headers) + section)
+    return path
 
 
 def self_test() -> int:
@@ -350,10 +576,101 @@ def self_test() -> int:
                 f"{list(core_symbols)} undefined"
             )
 
+    # ── The Windows path ──────────────────────────────────────────────────────
+    # There is no `nm` on a Windows runner, so this is the only reader that
+    # answers either question there. A synthetic image is the only way to plant
+    # a socket import on a machine with no Windows toolchain, and without a
+    # planted one the reader would be a function nobody has ever seen report
+    # anything.
+    with tempfile.TemporaryDirectory() as workdir:
+        work = pathlib.Path(workdir)
+
+        for plus in (True, False):
+            width = "PE32+" if plus else "PE32"
+
+            clean = synthetic_pe(
+                work / f"clean{int(plus)}.dll",
+                {
+                    "kernel32.dll": ["WriteFile", "ReadFile", "GetLastError"],
+                    "bcrypt.dll": ["BCryptGenRandom"],
+                    "advapi32.dll": ["SystemFunction036"],
+                    "ntdll.dll": ["NtCreateFile"],
+                },
+                plus=plus,
+            )
+            libraries, functions = pe_imports(clean)
+            if [line for line in libraries if FORBIDDEN_LIBRARY_PATTERN.search(line)]:
+                print(f"self-test FAILED: {width} — a clean import table was flagged", file=sys.stderr)
+                return 1
+            if offending_symbols(functions):
+                print(
+                    f"self-test FAILED: {width} — clean imports matched "
+                    f"{sorted(offending_symbols(functions))}",
+                    file=sys.stderr,
+                )
+                return 1
+            if "BCryptGenRandom" not in functions or "kernel32.dll" not in libraries:
+                print(
+                    f"self-test FAILED: {width} — the reader lost imports it was given: "
+                    f"{libraries} {functions}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            dirty = synthetic_pe(
+                work / f"dirty{int(plus)}.dll",
+                {
+                    "kernel32.dll": ["WriteFile"],
+                    "ws2_32.dll": ["WSAStartup", "socket", "connect", "send", "recv", "getaddrinfo"],
+                    "secur32.dll": ["InitializeSecurityContextW"],
+                },
+                plus=plus,
+            )
+            libraries, functions = pe_imports(dirty)
+            flagged_libraries = {line for line in libraries if FORBIDDEN_LIBRARY_PATTERN.search(line)}
+            if flagged_libraries != {"ws2_32.dll", "secur32.dll"}:
+                print(
+                    f"self-test FAILED: {width} — a planted Winsock/schannel import was reported as "
+                    f"{sorted(flagged_libraries)}",
+                    file=sys.stderr,
+                )
+                return 1
+            expected = {"WSAStartup", "socket", "connect", "send", "recv", "getaddrinfo"}
+            if offending_symbols(functions) != expected:
+                print(
+                    f"self-test FAILED: {width} — planted socket imports were reported as "
+                    f"{sorted(offending_symbols(functions))}, expected {sorted(expected)}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            # And the two routing functions really send a PE through this
+            # reader rather than reaching for a tool that is not there.
+            if undefined_symbols(dirty) != functions or linked_libraries(dirty) != libraries:
+                print(f"self-test FAILED: {width} — a PE was not routed to the import reader", file=sys.stderr)
+                return 1
+
+        # A file the reader cannot read must raise, not return an empty and
+        # therefore clean answer.
+        for name, blob in (
+            ("truncated.dll", b"MZ" + b"\x00" * 8),
+            ("no-pe-header.dll", b"MZ" + b"\x00" * 0x3A + (0x40).to_bytes(4, "little") + b"NOPE" + b"\x00" * 512),
+        ):
+            broken = work / name
+            broken.write_bytes(blob)
+            try:
+                pe_imports(broken)
+            except UninspectableArtifact:
+                continue
+            print(f"self-test FAILED: {name} was parsed as a readable PE", file=sys.stderr)
+            return 1
+
     print(
         f"self-test ok: the matcher finds a planted TLS stack, catches all "
         f"{len(FORBIDDEN_SYMBOLS)} socket entry points parsed from real nm output in "
-        f"both platforms' spellings, and clears a clean tree and a clean symbol table"
+        f"both platforms' spellings, clears a clean tree and a clean symbol table, and "
+        f"reads a planted ws2_32/secur32 import out of both a PE32 and a PE32+ image "
+        f"while refusing a file that is not one"
     )
     return 0
 
@@ -361,6 +678,13 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact", type=pathlib.Path)
+    parser.add_argument(
+        "--require-inspection",
+        action="store_true",
+        help="fail rather than SKIP when the artifact cannot be inspected. A release "
+        "pipeline builds in containers this repository has never seen, and a container "
+        "without nm would otherwise turn 'no socket' into 'not looked at' silently.",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -386,9 +710,22 @@ def main() -> int:
             print(f"FAIL: no artifact at {args.artifact}", file=sys.stderr)
             return 1
 
-        symbols = undefined_symbols(args.artifact)
+        try:
+            symbols = undefined_symbols(args.artifact)
+        except UninspectableArtifact as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 1
         if symbols is None:
-            print("SKIPPED: nm is not available, so the undefined symbols were not checked")
+            if args.require_inspection:
+                print(
+                    "FAIL: nm is not available, so nothing about this artifact's symbols has "
+                    "been established. --require-inspection was passed because a clean report "
+                    "from a check that did not run is worse than no report.",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print("SKIPPED: nm is not available, so the undefined symbols were not checked")
         else:
             caught = offending_symbols(symbols)
             if caught:
@@ -405,9 +742,21 @@ def main() -> int:
                     f"no direct socket call"
                 )
 
-        libraries = linked_libraries(args.artifact)
+        try:
+            libraries = linked_libraries(args.artifact)
+        except UninspectableArtifact as error:
+            print(f"FAIL: {error}", file=sys.stderr)
+            return 1
         if libraries is None:
-            print("SKIPPED: neither otool nor ldd is available, so linked libraries were not checked")
+            if args.require_inspection:
+                print(
+                    "FAIL: neither otool nor ldd is available, so nothing about this artifact's "
+                    "linked libraries has been established.",
+                    file=sys.stderr,
+                )
+                failures += 1
+            else:
+                print("SKIPPED: neither otool nor ldd is available, so linked libraries were not checked")
         else:
             offending = [line for line in libraries if FORBIDDEN_LIBRARY_PATTERN.search(line)]
             if offending:
