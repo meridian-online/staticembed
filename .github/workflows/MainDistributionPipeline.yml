@@ -29,10 +29,17 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Must equal `DUCKDB_VERSION`'s default in duckdb/community-extensions'
-  # .github/workflows/build.yml, and CI_TOOLS_VERSION its `ci_tools_version`.
+  # Read by the artifact names the download steps below build, and held equal to
+  # the build job's `duckdb_version` by scripts/check_description_examples.py.
+  # It must also equal `DUCKDB_VERSION`'s default in duckdb/community-extensions'
+  # .github/workflows/build.yml.
+  #
+  # The extension-ci-tools pin is NOT here. `uses:` takes no expression, so a
+  # variable could not reach it; the ref on the `uses:` line below and the
+  # `ci_tools_version` passed beside it are the pin, and that same script fails
+  # when those two disagree. A third copy here would read like the pin while
+  # controlling nothing, so there is not one.
   DUCKDB_VERSION: v1.5.5
-  CI_TOOLS_VERSION: v1.5-variegata
 
 jobs:
   duckdb-stable-build:
@@ -61,8 +68,16 @@ jobs:
   # container, and the reusable workflow does not run the test step for
   # linux_arm64 at all — so the Linux artifacts would be the ones never looked
   # at.
+  #
+  # `load` and `load_skipped_because` are not decoration.
+  # `scripts/check_description_examples.py` derives the platforms this
+  # configuration builds from the distribution matrix, the entry's exclusions
+  # and its opt-ins, and fails when one of them has no entry here, or has an
+  # entry that neither loads the artifact nor says what stops it. So a platform
+  # added to the build cannot arrive uninspected, and the one that cannot be
+  # loaded is a declared exception rather than a silence.
   no-network:
-    name: ${{ matrix.duckdb_arch }} opens no socket
+    name: the ${{ matrix.duckdb_arch }} artifact a stranger would download
     needs: duckdb-stable-build
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -71,14 +86,29 @@ jobs:
         include:
           - duckdb_arch: linux_amd64
             runner: ubuntu-24.04
+            load: true
+            duckdb_asset: duckdb_cli-linux-amd64.zip
           - duckdb_arch: linux_arm64
             runner: ubuntu-24.04-arm
+            load: true
+            duckdb_asset: duckdb_cli-linux-arm64.zip
           - duckdb_arch: osx_amd64
             runner: macos-15
+            load: false
+            load_skipped_because: >-
+              the artifact is x86_64, cross-built on the arm64 macos-15 runner the
+              distribution matrix itself names for osx_amd64, and GitHub offers no
+              Intel macOS runner to execute it on. Its trailer, its imports and its
+              exported symbols are read here; whether it LOADs is answered by the
+              first person to install it on an Intel Mac.
           - duckdb_arch: osx_arm64
             runner: macos-15
+            load: true
+            duckdb_asset: duckdb_cli-osx-arm64.zip
           - duckdb_arch: windows_amd64
             runner: windows-latest
+            load: true
+            duckdb_asset: duckdb_cli-windows-amd64.zip
 
     steps:
       - uses: actions/checkout@v4
@@ -117,9 +147,57 @@ jobs:
             --artifact downloaded/staticembed.duckdb_extension \
             --expect-platform ${{ matrix.duckdb_arch }}
 
+      # AC1. Everything above reads the file. None of it runs it, and a binary
+      # can carry a matching trailer, import no sockets, export the right
+      # symbols and still refuse to LOAD. Nothing else in the pipeline asks:
+      # base.Makefile sets SKIP_TESTS for linux_amd64 and inside the Linux
+      # container, and the reusable workflow does not run its test step for
+      # linux_arm64 at all, so `make test_release` reaches only osx_arm64 and
+      # windows_amd64. `INSTALL ... FROM community; LOAD staticembed;` failing
+      # is the exact experience this pipeline exists to prevent, so ask the
+      # uploaded artifact, on a runner of its own platform.
+      - name: Install the DuckDB CLI that would load it
+        if: matrix.load
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 -o duckdb_cli.zip \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/${{ matrix.duckdb_asset }}"
+          # Python rather than unzip: it is already installed on all five
+          # runners and spells the same on Windows. It does not carry the
+          # executable bit across, which is why the next step sets it.
+          python -c "import zipfile; zipfile.ZipFile('duckdb_cli.zip').extractall('cli')"
+
+      - name: It LOADs, and answers with a vector
+        if: matrix.load
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f cli/duckdb.exe ]; then
+            cli=cli/duckdb.exe
+          else
+            cli=cli/duckdb
+            chmod +x "$cli"
+          fi
+          mkdir -p empty_extension_dir
+          : > empty_init.sql
+          # `error()` raises, and the CLI exits non-zero when a statement
+          # raises, so a wrong answer fails this step rather than printing.
+          "$cli" -unsigned -init empty_init.sql -batch -noheader -list -c "
+            SET extension_directory='empty_extension_dir';
+            LOAD 'downloaded/staticembed.duckdb_extension';
+            SELECT staticembed_version();
+            SELECT CASE
+                WHEN len(embed('a foundry casting valve bodies')) = len(embed(''))
+                 AND len(embed('')) > 0
+                THEN 'embed() returned a full-width vector'
+                ELSE error('embed() did not return a full-width vector')
+            END;
+          "
+
       # AC4. The registry serves the gzip of the artifact — see
       # duckdb/duckdb's scripts/extension-upload-single.sh, which gzips before
-      # `aws s3 cp ... .duckdb_extension.gz`. So the number that matters to a
+      # uploading it as `.duckdb_extension.gz`. So the number that matters to a
       # stranger's download is the compressed one.
       - name: The size the registry would serve
         shell: bash
