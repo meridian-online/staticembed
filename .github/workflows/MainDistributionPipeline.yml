@@ -181,11 +181,18 @@ jobs:
           fi
           mkdir -p empty_extension_dir
           : > empty_init.sql
+          # Absolute, and with forward slashes. macOS refuses to dlopen a
+          # relative path from a hardened binary — "relative path not allowed in
+          # hardened program" — and bash's own $PWD on the Windows runner is an
+          # MSYS path the native DuckDB cannot resolve. Python's `as_posix()`
+          # spells one path all five runners accept.
+          artifact=$(python -c "import pathlib; print(pathlib.Path('downloaded/staticembed.duckdb_extension').resolve().as_posix())")
+          extdir=$(python -c "import pathlib; print(pathlib.Path('empty_extension_dir').resolve().as_posix())")
           # `error()` raises, and the CLI exits non-zero when a statement
           # raises, so a wrong answer fails this step rather than printing.
           "$cli" -unsigned -init empty_init.sql -batch -noheader -list -c "
-            SET extension_directory='empty_extension_dir';
-            LOAD 'downloaded/staticembed.duckdb_extension';
+            SET extension_directory='$extdir';
+            LOAD '$artifact';
             SELECT staticembed_version();
             SELECT CASE
                 WHEN len(embed('a foundry casting valve bodies')) = len(embed(''))
