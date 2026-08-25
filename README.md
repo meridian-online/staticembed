@@ -101,15 +101,18 @@ What it costs is adaptivity: the values kept are the ones seen first in the sess
 
 ## Building it
 
-Needs a Rust toolchain, Python 3 for the packaging and test scripts, and the `duckdb` CLI for the SQL tests.
+Needs a Rust toolchain, Python 3 for the packaging and test scripts, and the `duckdb` CLI for the SQL tests. `make check` also needs PyYAML, because it reads `description.yml` with a parser rather than a regex.
 
 ```
-make check           # formatting, clippy, Rust tests, the artifact, and the SQL tests
-make extension       # just the loadable artifact, in build/
-make mutation-check  # break the code on purpose and require the tests to notice
+make check            # formatting, clippy, Rust tests, the artifact, the SQL tests, the registry entry
+make extension        # just the loadable artifact, in build/
+make community-check  # the recipe duckdb/community-extensions runs, and the checks on what it built
+make mutation-check   # break the code on purpose and require the tests to notice
 ```
 
-`make check` is what CI runs. `make mutation-check` is not in CI, because each of its SQL mutations rebuilds the release binary; it applies a table of deliberate defects one at a time and fails unless the test named against each one reddens, which is the difference between a suite that is green and a suite that is watching.
+`make check` and `make community-check` are what CI runs. `make mutation-check` is not, because each of its SQL mutations rebuilds the release binary; it applies a table of deliberate defects one at a time and fails unless the test named against each one reddens, which is the difference between a suite that is green and a suite that is watching. CI does run `scripts/mutation_check.py --check-anchors`, which applies no mutation and asserts only that each one still names a line that exists.
+
+`make community-check` is the local form of the registry's own build. It needs `git submodule update --init --recursive` for `extension-ci-tools`, and it creates `configure/`, which is gitignored. `configure/extension_version.txt` must never be tracked: the upstream recipe writes that file only when it is absent, so a tracked copy would never be refreshed and would stamp a stale version onto every published artifact.
 
 The model is compiled into the binary, so the artifact is large — most of it is weights. Loading it needs `duckdb -unsigned` until a signed build exists in the community registry:
 
@@ -121,6 +124,8 @@ LOAD 'build/staticembed.duckdb_extension';
 ## Status
 
 Early. The extension builds, loads and answers queries; nothing is published to the community registry yet, so the `INSTALL ... FROM community` line at the top of this page does not work today. Build it yourself with `make extension` in the meantime.
+
+`description.yml` at the root of this repository is the registry entry, ready to be copied to `extensions/staticembed/description.yml` in [duckdb/community-extensions](https://github.com/duckdb/community-extensions), and `.github/workflows/MainDistributionPipeline.yml` runs the same build that registry would run. Submitting it is a separate decision and has not been taken.
 
 ## The model
 

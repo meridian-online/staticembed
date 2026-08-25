@@ -1,0 +1,218 @@
+name: DuckDB Extension Distribution
+
+# A rehearsal of the build duckdb/community-extensions will run.
+#
+# The registry does not read a build recipe out of `description.yml`. It checks
+# this repository out at that file's `repo.ref` and hands off to
+# `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml`,
+# which runs `make configure_ci`, `make release` and `make test_release` at the
+# root of this tree. This workflow calls THE SAME reusable workflow at THE SAME
+# ref the registry pins, with the same platform exclusions and toolchains the
+# entry declares, so a green run here is the registry's build rather than one
+# that resembles it. `scripts/check_description_examples.py` fails when the two
+# stop agreeing about any of that.
+#
+# duckdb_version is the version the registry's build.yml defaults to today. A
+# merged descriptor builds for exactly that one version: `build_all` re-sweeps
+# every extension when the maintainers bump it, and nothing else revisits an
+# extension afterwards.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}
+  cancel-in-progress: true
+
+env:
+  # Read by the artifact names the download steps below build, and held equal to
+  # the build job's `duckdb_version` by scripts/check_description_examples.py.
+  # It must also equal `DUCKDB_VERSION`'s default in duckdb/community-extensions'
+  # .github/workflows/build.yml.
+  #
+  # The extension-ci-tools pin is NOT here. `uses:` takes no expression, so a
+  # variable could not reach it; the ref on the `uses:` line below and the
+  # `ci_tools_version` passed beside it are the pin, and that same script fails
+  # when those two disagree. A third copy here would read like the pin while
+  # controlling nothing, so there is not one.
+  DUCKDB_VERSION: v1.5.5
+
+jobs:
+  duckdb-stable-build:
+    name: Build extension binaries
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    with:
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
+      extension_name: staticembed
+      # The Rust toolchain builds the cdylib; python3 backs the metadata-stamp
+      # venv that `make configure` creates.
+      extra_toolchains: 'rust;python3'
+      # Must equal description.yml's `excluded_platforms`.
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;linux_arm64_musl;windows_amd64_mingw'
+
+  # AC3. The no-network property was established against a locally built macOS
+  # dylib. These are different binaries, from containers and runners this
+  # repository has never seen, and a bundled-model extension that picked up an
+  # HTTP client through a toolchain would pass every other test in the tree. So
+  # every artifact the pipeline actually uploads is inspected, on a runner of
+  # its own platform so the native tools can read it, with --require-inspection
+  # so a missing tool is a failure rather than a clean-looking skip.
+  #
+  # This is a separate job rather than part of `make test_release` because
+  # base.Makefile sets SKIP_TESTS for linux_amd64 and inside the Linux build
+  # container, and the reusable workflow does not run the test step for
+  # linux_arm64 at all — so the Linux artifacts would be the ones never looked
+  # at.
+  #
+  # `load` and `load_skipped_because` are not decoration.
+  # `scripts/check_description_examples.py` derives the platforms this
+  # configuration builds from the distribution matrix, the entry's exclusions
+  # and its opt-ins, and fails when one of them has no entry here, or has an
+  # entry that neither loads the artifact nor says what stops it. So a platform
+  # added to the build cannot arrive uninspected, and the one that cannot be
+  # loaded is a declared exception rather than a silence.
+  no-network:
+    name: the ${{ matrix.duckdb_arch }} artifact a stranger would download
+    needs: duckdb-stable-build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - duckdb_arch: linux_amd64
+            runner: ubuntu-24.04
+            load: true
+            duckdb_asset: duckdb_cli-linux-amd64.zip
+          - duckdb_arch: linux_arm64
+            runner: ubuntu-24.04-arm
+            load: true
+            duckdb_asset: duckdb_cli-linux-arm64.zip
+          - duckdb_arch: osx_amd64
+            runner: macos-15
+            load: false
+            load_skipped_because: >-
+              the artifact is x86_64, cross-built on the arm64 macos-15 runner the
+              distribution matrix itself names for osx_amd64, and GitHub offers no
+              Intel macOS runner to execute it on. Its trailer, its imports and its
+              exported symbols are read here; whether it LOADs is answered by the
+              first person to install it on an Intel Mac.
+          - duckdb_arch: osx_arm64
+            runner: macos-15
+            load: true
+            duckdb_asset: duckdb_cli-osx-arm64.zip
+          - duckdb_arch: windows_amd64
+            runner: windows-latest
+            load: true
+            duckdb_asset: duckdb_cli-windows-amd64.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cargo tree --workspace --edges normal` is the third of the three
+      # checks: a crate that speaks HTTP would be visible there even if the
+      # linker discarded every symbol.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download the artifact this pipeline built
+        uses: actions/download-artifact@v4
+        with:
+          name: staticembed-${{ env.DUCKDB_VERSION }}-extension-${{ matrix.duckdb_arch }}
+          path: downloaded
+
+      - name: Nothing in it can open a socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_no_network_deps.py --self-test
+          python scripts/check_no_network_deps.py \
+            --artifact downloaded/staticembed.duckdb_extension \
+            --require-inspection
+
+      # AC6 on the artifact that would be published, not on a local build.
+      - name: It reports this tree's version and its own platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_artifact_version.py --self-test
+          python scripts/check_artifact_version.py \
+            --artifact downloaded/staticembed.duckdb_extension \
+            --expect-platform ${{ matrix.duckdb_arch }}
+
+      # Everything above reads the file. None of it runs it, and a binary
+      # can carry a matching trailer, import no sockets, export the right
+      # symbols and still refuse to LOAD. Nothing else in the pipeline asks:
+      # base.Makefile sets SKIP_TESTS for linux_amd64 and inside the Linux
+      # container, and the reusable workflow does not run its test step for
+      # linux_arm64 at all, so `make test_release` reaches only osx_arm64 and
+      # windows_amd64. `INSTALL ... FROM community; LOAD staticembed;` failing
+      # is the exact experience this pipeline exists to prevent, so ask the
+      # uploaded artifact, on a runner of its own platform.
+      - name: Install the DuckDB CLI that would load it
+        if: matrix.load
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 5 -o duckdb_cli.zip \
+            "https://github.com/duckdb/duckdb/releases/download/${DUCKDB_VERSION}/${{ matrix.duckdb_asset }}"
+          # Python rather than unzip: it is already installed on all five
+          # runners and spells the same on Windows. It does not carry the
+          # executable bit across, which is why the next step sets it.
+          python -c "import zipfile; zipfile.ZipFile('duckdb_cli.zip').extractall('cli')"
+
+      - name: It LOADs, and answers with a vector
+        if: matrix.load
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f cli/duckdb.exe ]; then
+            cli=cli/duckdb.exe
+          else
+            cli=cli/duckdb
+            chmod +x "$cli"
+          fi
+          mkdir -p empty_extension_dir
+          : > empty_init.sql
+          # Absolute, and with forward slashes. macOS refuses to dlopen a
+          # relative path from a hardened binary — "relative path not allowed in
+          # hardened program" — and bash's own $PWD on the Windows runner is an
+          # MSYS path the native DuckDB cannot resolve. Python's `as_posix()`
+          # spells one path all five runners accept.
+          artifact=$(python -c "import pathlib; print(pathlib.Path('downloaded/staticembed.duckdb_extension').resolve().as_posix())")
+          extdir=$(python -c "import pathlib; print(pathlib.Path('empty_extension_dir').resolve().as_posix())")
+          # `error()` raises, and the CLI exits non-zero when a statement
+          # raises, so a wrong answer fails this step rather than printing.
+          "$cli" -unsigned -init empty_init.sql -batch -noheader -list -c "
+            SET extension_directory='$extdir';
+            LOAD '$artifact';
+            SELECT staticembed_version();
+            SELECT CASE
+                WHEN len(embed('a foundry casting valve bodies')) = len(embed(''))
+                 AND len(embed('')) > 0
+                THEN 'embed() returned a full-width vector'
+                ELSE error('embed() did not return a full-width vector')
+            END;
+          "
+
+      # AC4. The registry serves the gzip of the artifact — see
+      # duckdb/duckdb's scripts/extension-upload-single.sh, which gzips before
+      # uploading it as `.duckdb_extension.gz`. So the number that matters to a
+      # stranger's download is the compressed one.
+      - name: The size the registry would serve
+        shell: bash
+        run: |
+          python - downloaded/staticembed.duckdb_extension <<'EOF'
+          import gzip, pathlib, sys
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          served = len(gzip.compress(raw))
+          print(f"raw      {len(raw):>12,} bytes  ({len(raw)/2**20:.1f} MiB)")
+          print(f"served   {served:>12,} bytes  ({served/2**20:.1f} MiB)  gzip, as the registry uploads it")
+          EOF
