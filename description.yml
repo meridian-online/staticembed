@@ -35,7 +35,7 @@ extension:
 
 repo:
   github: meridian-online/staticembed
-  ref: 1105eb38f6ebf6d95f7efdc5b4ddc60d79e303e4
+  ref: 18099ec60057099b37a38c57522c9194685c56d4
 
 docs:
   hello_world: |
