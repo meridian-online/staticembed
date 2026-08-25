@@ -1,0 +1,133 @@
+name: DuckDB Extension Distribution
+
+# A rehearsal of the build duckdb/community-extensions will run.
+#
+# The registry does not read a build recipe out of `description.yml`. It checks
+# this repository out at that file's `repo.ref` and hands off to
+# `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml`,
+# which runs `make configure_ci`, `make release` and `make test_release` at the
+# root of this tree. This workflow calls THE SAME reusable workflow at THE SAME
+# ref the registry pins, with the same platform exclusions and toolchains the
+# entry declares, so a green run here is the registry's build rather than one
+# that resembles it. `scripts/check_description_examples.py` fails when the two
+# stop agreeing about any of that.
+#
+# duckdb_version is the version the registry's build.yml defaults to today. A
+# merged descriptor builds for exactly that one version: `build_all` re-sweeps
+# every extension when the maintainers bump it, and nothing else revisits an
+# extension afterwards.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.head_ref || '' }}
+  cancel-in-progress: true
+
+env:
+  # Must equal `DUCKDB_VERSION`'s default in duckdb/community-extensions'
+  # .github/workflows/build.yml, and CI_TOOLS_VERSION its `ci_tools_version`.
+  DUCKDB_VERSION: v1.5.5
+  CI_TOOLS_VERSION: v1.5-variegata
+
+jobs:
+  duckdb-stable-build:
+    name: Build extension binaries
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    with:
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
+      extension_name: staticembed
+      # The Rust toolchain builds the cdylib; python3 backs the metadata-stamp
+      # venv that `make configure` creates.
+      extra_toolchains: 'rust;python3'
+      # Must equal description.yml's `excluded_platforms`.
+      exclude_archs: 'wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;linux_arm64_musl;windows_amd64_mingw'
+
+  # AC3. The no-network property was established against a locally built macOS
+  # dylib. These are different binaries, from containers and runners this
+  # repository has never seen, and a bundled-model extension that picked up an
+  # HTTP client through a toolchain would pass every other test in the tree. So
+  # every artifact the pipeline actually uploads is inspected, on a runner of
+  # its own platform so the native tools can read it, with --require-inspection
+  # so a missing tool is a failure rather than a clean-looking skip.
+  #
+  # This is a separate job rather than part of `make test_release` because
+  # base.Makefile sets SKIP_TESTS for linux_amd64 and inside the Linux build
+  # container, and the reusable workflow does not run the test step for
+  # linux_arm64 at all — so the Linux artifacts would be the ones never looked
+  # at.
+  no-network:
+    name: ${{ matrix.duckdb_arch }} opens no socket
+    needs: duckdb-stable-build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - duckdb_arch: linux_amd64
+            runner: ubuntu-24.04
+          - duckdb_arch: linux_arm64
+            runner: ubuntu-24.04-arm
+          - duckdb_arch: osx_amd64
+            runner: macos-15
+          - duckdb_arch: osx_arm64
+            runner: macos-15
+          - duckdb_arch: windows_amd64
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # `cargo tree --workspace --edges normal` is the third of the three
+      # checks: a crate that speaks HTTP would be visible there even if the
+      # linker discarded every symbol.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download the artifact this pipeline built
+        uses: actions/download-artifact@v4
+        with:
+          name: staticembed-${{ env.DUCKDB_VERSION }}-extension-${{ matrix.duckdb_arch }}
+          path: downloaded
+
+      - name: Nothing in it can open a socket
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_no_network_deps.py --self-test
+          python scripts/check_no_network_deps.py \
+            --artifact downloaded/staticembed.duckdb_extension \
+            --require-inspection
+
+      # AC6 on the artifact that would be published, not on a local build.
+      - name: It reports this tree's version and its own platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/check_artifact_version.py --self-test
+          python scripts/check_artifact_version.py \
+            --artifact downloaded/staticembed.duckdb_extension \
+            --expect-platform ${{ matrix.duckdb_arch }}
+
+      # AC4. The registry serves the gzip of the artifact — see
+      # duckdb/duckdb's scripts/extension-upload-single.sh, which gzips before
+      # `aws s3 cp ... .duckdb_extension.gz`. So the number that matters to a
+      # stranger's download is the compressed one.
+      - name: The size the registry would serve
+        shell: bash
+        run: |
+          python - downloaded/staticembed.duckdb_extension <<'EOF'
+          import gzip, pathlib, sys
+          raw = pathlib.Path(sys.argv[1]).read_bytes()
+          served = len(gzip.compress(raw))
+          print(f"raw      {len(raw):>12,} bytes  ({len(raw)/2**20:.1f} MiB)")
+          print(f"served   {served:>12,} bytes  ({served/2**20:.1f} MiB)  gzip, as the registry uploads it")
+          EOF

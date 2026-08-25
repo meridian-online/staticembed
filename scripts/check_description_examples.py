@@ -58,6 +58,8 @@ import tempfile
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 DESCRIPTION = REPO_ROOT / "description.yml"
 MATRIX = REPO_ROOT / "extension-ci-tools" / "config" / "distribution_matrix.json"
+REHEARSAL = REPO_ROOT / ".github" / "workflows" / "MainDistributionPipeline.yml"
+BUILD_JOB = "duckdb-stable-build"
 
 MARKER = "STATICEMBED_EXAMPLE"
 
@@ -224,6 +226,61 @@ def known_platforms() -> set[str] | None:
     }
 
 
+def rehearsal_problems(descriptor: dict, workflow: dict | None) -> list[str]:
+    """Where our own distribution workflow and the registry entry disagree.
+
+    The entry declares which platforms the registry builds and which toolchains
+    it installs; `MainDistributionPipeline.yml` calls the same reusable workflow
+    with its own copy of both. Two copies that happen to agree today is what an
+    acceptance criterion warned against, so this is where they are held
+    together: a platform excluded in one and not the other means the run that
+    goes green is not the run the registry will do.
+    """
+    if workflow is None:
+        return []
+    problems: list[str] = []
+    extension = descriptor.get("extension") or {}
+    job = ((workflow.get("jobs") or {}).get(BUILD_JOB) or {})
+    inputs = job.get("with") or {}
+    if not inputs:
+        return [f"{REHEARSAL.name} has no `{BUILD_JOB}` job with inputs to compare"]
+
+    for entry_field, workflow_field in (
+        ("name", "extension_name"),
+        ("excluded_platforms", "exclude_archs"),
+        ("requires_toolchains", "extra_toolchains"),
+    ):
+        entry_value = str(extension.get(entry_field, ""))
+        workflow_value = str(inputs.get(workflow_field, ""))
+        if entry_value != workflow_value:
+            problems.append(
+                f"description.yml's {entry_field} is {entry_value!r} but "
+                f"{REHEARSAL.name}'s {workflow_field} is {workflow_value!r} — "
+                f"the rehearsal would not build what the registry builds"
+            )
+
+    # The reusable workflow's ref and the ci_tools_version it is given have to
+    # be the same, or the workflow that runs and the makefiles it drives come
+    # from two different releases of extension-ci-tools.
+    uses = str(job.get("uses", ""))
+    pinned = uses.rsplit("@", 1)[-1] if "@" in uses else ""
+    if pinned != str(inputs.get("ci_tools_version", "")):
+        problems.append(
+            f"{REHEARSAL.name} calls the reusable workflow at {pinned!r} but passes "
+            f"ci_tools_version {inputs.get('ci_tools_version')!r}"
+        )
+
+    declared = str((workflow.get("env") or {}).get("DUCKDB_VERSION", ""))
+    if declared != str(inputs.get("duckdb_version", "")):
+        problems.append(
+            f"{REHEARSAL.name}'s env.DUCKDB_VERSION is {declared!r} but the build job is "
+            f"given duckdb_version {inputs.get('duckdb_version')!r}; the artifact names the "
+            f"jobs download are built from the first and produced by the second"
+        )
+
+    return problems
+
+
 def descriptor_problems(descriptor: dict, functions: list[str] | None) -> list[str]:
     """Everything about the entry that disagrees with this tree."""
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -264,6 +321,10 @@ def descriptor_problems(descriptor: dict, functions: list[str] | None) -> list[s
                         f"extension.{field} names {name!r}, which is not a duckdb_arch in the "
                         f"distribution matrix — a misspelt exclusion excludes nothing"
                     )
+
+    problems += rehearsal_problems(
+        descriptor, load_yaml(REHEARSAL) if REHEARSAL.is_file() else None
+    )
 
     if functions is not None:
         docs = descriptor.get("docs") or {}
@@ -382,6 +443,55 @@ docs:
         )
     else:
         print("self-test: SKIPPED the platform-name check — extension-ci-tools is not checked out")
+
+    # The rehearsal workflow against the entry. Each field is disagreed with in
+    # turn, because a comparison nobody has seen report a difference is a
+    # comparison of a value with itself.
+    entry = {
+        "extension": {
+            "name": "staticembed",
+            "excluded_platforms": "wasm_mvp;windows_amd64_mingw",
+            "requires_toolchains": "rust;python3",
+        }
+    }
+    agreeing = {
+        "env": {"DUCKDB_VERSION": "v1.5.5"},
+        "jobs": {
+            "duckdb-stable-build": {
+                "uses": "duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata",
+                "with": {
+                    "extension_name": "staticembed",
+                    "exclude_archs": "wasm_mvp;windows_amd64_mingw",
+                    "extra_toolchains": "rust;python3",
+                    "ci_tools_version": "v1.5-variegata",
+                    "duckdb_version": "v1.5.5",
+                },
+            }
+        },
+    }
+    expect("an agreeing rehearsal reports nothing", rehearsal_problems(entry, agreeing) == [])
+
+    import copy
+
+    for field, value, needle in (
+        ("exclude_archs", "wasm_mvp", "excluded_platforms"),
+        ("extra_toolchains", "rust", "requires_toolchains"),
+        ("extension_name", "staticembedd", "name"),
+        ("ci_tools_version", "v1.5.5", "ci_tools_version"),
+        ("duckdb_version", "v1.5.4", "DUCKDB_VERSION"),
+    ):
+        broken = copy.deepcopy(agreeing)
+        broken["jobs"]["duckdb-stable-build"]["with"][field] = value
+        expect(
+            f"a rehearsal that changed {field} is caught",
+            any(needle in problem for problem in rehearsal_problems(entry, broken)),
+        )
+
+    missing = {"env": {}, "jobs": {"something-else": {}}}
+    expect(
+        "a rehearsal with no build job is caught",
+        any("no `duckdb-stable-build` job" in problem for problem in rehearsal_problems(entry, missing)),
+    )
 
     # And the runner itself. No extension needed: this proves that a failing
     # example makes this script fail, which is the whole point of running them.
