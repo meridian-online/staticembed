@@ -35,6 +35,15 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CORE = "crates/staticembed-core/src"
 GLUE = "crates/staticembed-duckdb/src/lib.rs"
 
+#: The packaged artifact `make extension` writes, and which every SQL and script
+#: mutation here rebuilds from broken source. `git checkout --` puts the code
+#: back and says nothing about this file, so a mutated build of the extension
+#: outlives the mutation that made it and answers to the branch's name. A
+#: measurement taken against one read `embed('steel logistics')` as
+#: order-sensitive on a tree whose own tests said otherwise. Deleted after every
+#: mutation, so the next reader has to build one rather than find one.
+ARTIFACT = "build/staticembed.duckdb_extension"
+
 
 @dataclass
 class Mutation:
@@ -109,25 +118,25 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="embed_always_takes_the_no_token_path",
         file=f"{CORE}/model.rs",
-        old="        conform(self.inner.encode_single(text), self.dim)",
-        new="        let _ = self.inner.encode_single(text);\n        conform(Vec::new(), self.dim)",
+        old="        conform(vector, self.dim)",
+        new="        let _ = vector;\n        conform(Vec::new(), self.dim)",
         expect_red="ordinary_text_gets_a_full_width_non_zero_vector",
         also_reddens=["different_strings_get_different_vectors"],
     ),
     Mutation(
         name="the_empty_string_is_given_a_one_vector_instead_of_a_zero_vector",
         file=f"{CORE}/model.rs",
-        old="        conform(self.inner.encode_single(text), self.dim)",
-        new="        if text.trim().is_empty() {\n            return Ok(vec![1.0_f32; self.dim]);\n        }\n        conform(self.inner.encode_single(text), self.dim)",
+        old="        let sentence = [text.to_string()];",
+        new="        if text.trim().is_empty() {\n            return Ok(vec![1.0_f32; self.dim]);\n        }\n        let sentence = [text.to_string()];",
         expect_red="text_with_no_tokens_gets_a_zero_vector_of_full_width",
     ),
     Mutation(
         name="embed_becomes_stateful_across_calls",
         file=f"{CORE}/model.rs",
-        old="        conform(self.inner.encode_single(text), self.dim)",
+        old="        conform(vector, self.dim)",
         new=(
             "        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);\n"
-            "        let mut vector = self.inner.encode_single(text);\n"
+            "        let mut vector = vector;\n"
             "        if CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % 2 == 0 {\n"
             "            if let Some(first) = vector.first_mut() {\n"
             "                *first += 1.0;\n"
@@ -140,19 +149,117 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="the_pool_becomes_order_sensitive",
         file=f"{CORE}/model.rs",
-        old="        conform(self.inner.encode_single(text), self.dim)",
+        old="        let sentence = [text.to_string()];",
         new=(
-            "        conform(\n"
-            '            self.inner.encode_single(&format!(\n'
-            '                "{} {}",\n'
-            '                text.split_whitespace().next().unwrap_or(""),\n'
-            "                text\n"
-            "            )),\n"
-            "            self.dim,\n"
-            "        )"
+            "        let sentence = [format!(\n"
+            '            "{} {}",\n'
+            '            text.split_whitespace().next().unwrap_or(""),\n'
+            "            text\n"
+            "        )];"
         ),
         expect_red="the_pool_is_a_mean_so_order_is_lost_and_repetition_is_not",
         also_reddens=["case_and_surrounding_whitespace_do_not_change_the_vector"],
+    ),
+    # ── truncation ───────────────────────────────────────────────────────────
+    # None of these existed while the mechanism was built and twice rebuilt, and
+    # every one of them survived the suite as it stood: the corpus was ASCII, so
+    # nothing in it could tell a character from a byte, and no input carried an
+    # unknown token in a position that counted.
+    Mutation(
+        name="the_character_cut_counts_bytes_instead_of_characters",
+        file=f"{CORE}/model.rs",
+        old=(
+            "        text.char_indices()\n"
+            "            .nth(max_tokens.saturating_mul(median_token_length))\n"
+            "            .map_or(text, |(byte_idx, _)| &text[..byte_idx])"
+        ),
+        new=(
+            "        let limit = max_tokens.saturating_mul(median_token_length);\n"
+            "        if text.len() <= limit {\n"
+            "            return text;\n"
+            "        }\n"
+            "        let mut end = limit;\n"
+            "        while !text.is_char_boundary(end) {\n"
+            "            end -= 1;\n"
+            "        }\n"
+            "        &text[..end]"
+        ),
+        expect_red="the_clipped_verdict_matches_what_the_cap_cost_the_vector",
+        also_reddens=[
+            "a_generated_mixed_script_corpus_reports_clipped_exactly_when_the_cap_cost_it"
+        ],
+    ),
+    # The same break, measured through DuckDB rather than through cargo, so the
+    # SQL corpus is shown to be watching the mechanism and not only the Rust one.
+    Mutation(
+        name="the_character_cut_counts_bytes_instead_of_characters_seen_from_sql",
+        file=f"{CORE}/model.rs",
+        old=(
+            "        text.char_indices()\n"
+            "            .nth(max_tokens.saturating_mul(median_token_length))\n"
+            "            .map_or(text, |(byte_idx, _)| &text[..byte_idx])"
+        ),
+        new=(
+            "        let limit = max_tokens.saturating_mul(median_token_length);\n"
+            "        if text.len() <= limit {\n"
+            "            return text;\n"
+            "        }\n"
+            "        let mut end = limit;\n"
+            "        while !text.is_char_boundary(end) {\n"
+            "            end -= 1;\n"
+            "        }\n"
+            "        &text[..end]"
+        ),
+        expect_red="10_a_long_text",
+        kind="sql",
+    ),
+    Mutation(
+        name="the_unknown_token_id_is_never_recovered",
+        file=f"{CORE}/model.rs",
+        old=(
+            "        let unk_token_id = spec\n"
+            '            .get("model")\n'
+            '            .and_then(|model| model.get("unk_token"))\n'
+            "            .and_then(serde_json::Value::as_str)\n"
+            "            .and_then(|token| tokenizer.token_to_id(token))\n"
+            "            .map(|id| id as usize);"
+        ),
+        new="        let _ = &spec;\n        let unk_token_id: Option<usize> = None;",
+        expect_red="the_clipped_verdict_matches_what_the_cap_cost_the_vector",
+        also_reddens=[
+            "a_generated_mixed_script_corpus_reports_clipped_exactly_when_the_cap_cost_it"
+        ],
+    ),
+    Mutation(
+        name="the_token_cap_moves_by_one",
+        file=f"{CORE}/model.rs",
+        old="pub const MAX_TOKENS: usize = 512;",
+        new="pub const MAX_TOKENS: usize = 511;",
+        expect_red="embed_is_byte_identical_to_the_upstream_wrapper_it_replaced",
+        also_reddens=[
+            "the_clipped_verdict_matches_what_the_cap_cost_the_vector",
+            "a_long_text_is_reported_clipped_exactly_where_the_marker_stops_reaching_the_mean",
+        ],
+    ),
+    # The defect the length comparison this replaced actually had: any text over
+    # the character cut answered yes, whether or not an id went with it.
+    Mutation(
+        name="a_text_past_the_character_cut_is_called_clipped_whatever_it_lost",
+        file=f"{CORE}/model.rs",
+        old="        pooled.truncate(max_tokens);\n\n        pooled != whole",
+        new="        pooled.truncate(max_tokens);\n\n        char_cut.len() < text.len() || pooled != whole",
+        expect_red="text_with_no_tokens_is_not_reported_clipped",
+        also_reddens=["the_clipped_verdict_matches_what_the_cap_cost_the_vector"],
+    ),
+    # And the defect the version before that had: the predicate never looks past
+    # the character cut, so it sees the token cut alone.
+    Mutation(
+        name="the_predicate_stops_looking_past_the_character_cut",
+        file=f"{CORE}/model.rs",
+        old="        let whole = self.surviving_ids(text);",
+        new="        let whole =\n            self.surviving_ids(Self::char_truncate(text, max_tokens, self.median_token_length));",
+        expect_red="text_is_reported_clipped_by_the_character_cut_alone",
+        also_reddens=["the_clipped_verdict_matches_what_the_cap_cost_the_vector"],
     ),
     # ── the cache ────────────────────────────────────────────────────────────
     Mutation(
@@ -597,16 +704,13 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="the_pool_becomes_order_sensitive_seen_from_sql",
         file=f"{CORE}/model.rs",
-        old="        conform(self.inner.encode_single(text), self.dim)",
+        old="        let sentence = [text.to_string()];",
         new=(
-            "        conform(\n"
-            '            self.inner.encode_single(&format!(\n'
-            '                "{} {}",\n'
-            '                text.split_whitespace().next().unwrap_or(""),\n'
-            "                text\n"
-            "            )),\n"
-            "            self.dim,\n"
-            "        )"
+            "        let sentence = [format!(\n"
+            '            "{} {}",\n'
+            '            text.split_whitespace().next().unwrap_or(""),\n'
+            "            text\n"
+            "        )];"
         ),
         expect_red="06_text_the_tokenizer",
         kind="sql",
@@ -714,6 +818,7 @@ def apply(mutation: Mutation) -> None:
 
 def restore(mutation: Mutation) -> None:
     run(["git", "checkout", "--", mutation.file])
+    (REPO_ROOT / ARTIFACT).unlink(missing_ok=True)
 
 
 #: `test result: ok. 3 passed; 0 failed; ...`
@@ -763,7 +868,7 @@ def script_check_failed(command: list[str], duckdb: str) -> tuple[bool, str]:
     to be measured by running it. `--extension` builds are done first when the
     command needs one.
     """
-    if any("--extension" in argument for argument in command):
+    if any(ARTIFACT in argument for argument in command):
         built = run(["make", "extension"])
         if built.returncode != 0:
             raise RanNothing(f"the mutated tree did not build:\n{built.stdout}{built.stderr}")

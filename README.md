@@ -30,11 +30,12 @@ Figures, corpora and method are published with the measurement in [meridian-onli
 
 ## The SQL surface
 
-Four functions, and `embed` is the one you came for.
+Five functions, and `embed` is the one you came for.
 
 | function | returns | what it is for |
 |---|---|---|
 | `embed(text VARCHAR)` | `FLOAT[]` | the vector for one string |
+| `embed_is_truncated(text VARCHAR)` | `BOOLEAN` | whether `embed(text)` had to drop content to fit |
 | `staticembed_version()` | `VARCHAR` | which build, which model, which vector width |
 | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | what the cache has been doing |
 | `staticembed_cache_clear()` | `BIGINT` | drop the cached vectors; returns how many |
@@ -50,6 +51,22 @@ If you want the single behaviour a text pipeline usually gives you, ask for it:
 ```sql
 SELECT embed(coalesce(description, '')) FROM corpus;
 ```
+
+### A long text is truncated before the mean, and nothing about the vector says so
+
+`embed` builds its vector from at most **512 tokens** of `text` — roughly the first few hundred words of ordinary English for most prose. Anything past that is dropped before the mean is taken, not down-weighted, and the vector that comes back is full width and unit norm either way. Two rows whose descriptions agree up to the cut and then diverge completely embed to the same place, and nothing about the result tells you that happened.
+
+That 512-token figure is not the whole story for every kind of text. Before it tokenises anything, `embed` cuts the raw string to a character count derived from the vocabulary — just over three thousand characters for this model. For text made of unusually long, dense tokens — URLs, camelCase or snake_case identifiers, run-together compound words, anything with few word breaks — that is the cut that bites, and it bites while the token count is still nowhere near 512. Non-Latin scripts move the balance the other way: a line of Korean is two or three tokens per character, so it reaches the token cap in a few hundred. You do not need to reason about which case you are in: `embed_is_truncated` answers the question either way, which is the point of asking it instead of counting.
+
+`embed_is_truncated(text)` is how you find out before you trust a result — a plain question, not a token count, so you never have to know the limit is 512, or where else it might bite, to ask it:
+
+```sql
+SELECT count(*) FROM corpus WHERE embed_is_truncated(description);
+```
+
+`embed_is_truncated(NULL)` is `NULL`, the same as `embed(NULL)`, so it drops out of a `WHERE` clause the same way.
+
+What it reports is whether `embed` pooled less of the text than the whole of it would have given, and that is not the same question as whether the text was long. Five thousand spaces is `false`. So is a column of characters this vocabulary does not carry, however far past the character cut it runs: the cut took nothing that would have reached the mean. It also costs more than `embed` does on a very long value — `embed` stops reading at the character cut and this has to look past it to know whether anything was there.
 
 ### What counts as the same string
 

@@ -17,15 +17,25 @@ repository = "https://github.com/meridian-online/staticembed"
 # `StaticModel::from_bytes` over `include_bytes!` data, so nothing is fetched.
 model2vec-rs = { version = "0.2.1", default-features = false, features = ["local-only"] }
 
-# `tokenizers` is a transitive dependency of model2vec-rs, listed here only to
-# choose its regex backend. Its default features are `progressbar` + `onig` +
-# `esaxx_fast`; `onig` and `esaxx_fast` each build a bundled C/C++ library, and
-# `tokenizers/http` would bring back the TLS stack `model2vec-rs`'s
-# default-features-off already removed. `fancy-regex` is pure Rust and needs no
-# native toolchain, which is what keeps this extension cross-compilable.
+# `tokenizers` is a transitive dependency of model2vec-rs. It was originally
+# listed here only to choose its regex backend; `staticembed-core` now also
+# loads a second copy of the bundled tokenizer directly with it, to answer
+# "did `embed` lose any of this text" — that needs the id list either side of
+# the cuts, and `model2vec_rs::StaticModel` keeps its own tokenizer, its unk
+# token and its median token length private with no accessor. Its default
+# features are `progressbar` + `onig` + `esaxx_fast`; `onig` and `esaxx_fast`
+# each build a bundled C/C++ library, and `tokenizers/http` would bring back the
+# TLS stack `model2vec-rs`'s default-features-off already removed. `fancy-regex`
+# is pure Rust and needs no native toolchain, which is what keeps this
+# extension cross-compilable.
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 
 sha2 = "0.10"
+
+# Used once, to recover the bundled tokenizer's unk-token id the same way
+# `model2vec_rs`'s own (private) metadata step does: round-trip the tokenizer
+# through JSON and read `model.unk_token`. There is no public accessor for it.
+serde_json = "1"
 
 # Pinned exactly, matching the DuckDB C API surface this artifact is built
 # against. The stable C_STRUCT ABI floor the packaged artifact declares is
