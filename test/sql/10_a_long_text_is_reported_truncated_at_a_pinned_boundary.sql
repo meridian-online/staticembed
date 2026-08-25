@@ -136,7 +136,7 @@ CREATE TABLE byte_against_character AS SELECT * FROM (VALUES
 
 SELECT must('the byte-against-character probe is under 3072 characters and over 3072 bytes',
     (SELECT length(with_marker) FROM byte_against_character) = 2936
-    AND (SELECT octet_length(with_marker) FROM byte_against_character) = 3336);
+    AND (SELECT strlen(with_marker) FROM byte_against_character) = 3336);
 SELECT must('a text of 2936 characters in 3336 bytes is not reported truncated',
     (SELECT embed_is_truncated(with_marker) FROM byte_against_character) = false);
 SELECT must('and its marker still reaches the mean, so nothing was dropped',
