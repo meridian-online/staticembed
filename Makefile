@@ -176,8 +176,15 @@ COMMUNITY_EXTENSION := $(EXTENSION_BUILD_PATH)/release/extension/$(EXTENSION_NAM
 
 configure: venv platform extension_version
 
-release: build_extension_library_release build_extension_with_metadata_release
-debug:   build_extension_library_debug   build_extension_with_metadata_debug
+## `extension_version` first, and this is load-bearing rather than tidy.
+## base.Makefile's own `release` prerequisites do not include it: only `make
+## configure` ever asks for configure/extension_version.txt, so on a tree where
+## that file already exists `make release` reads it without regenerating it and
+## stamps whatever it says. Adding it here, with the Cargo.toml prerequisite
+## below, means a version bump is picked up by the build that publishes rather
+## than only by the one that configures.
+release: extension_version build_extension_library_release build_extension_with_metadata_release
+debug:   extension_version build_extension_library_debug   build_extension_with_metadata_debug
 
 ## Only the cdylib, not the whole workspace: staticembed-core's dev-dependencies
 ## and test binaries have no business in a distribution build.
