@@ -35,6 +35,15 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 CORE = "crates/staticembed-core/src"
 GLUE = "crates/staticembed-duckdb/src/lib.rs"
 
+#: The packaged artifact `make extension` writes, and which every SQL and script
+#: mutation here rebuilds from broken source. `git checkout --` puts the code
+#: back and says nothing about this file, so a mutated build of the extension
+#: outlives the mutation that made it and answers to the branch's name. A
+#: measurement taken against one read `embed('steel logistics')` as
+#: order-sensitive on a tree whose own tests said otherwise. Deleted after every
+#: mutation, so the next reader has to build one rather than find one.
+ARTIFACT = "build/staticembed.duckdb_extension"
+
 
 @dataclass
 class Mutation:
@@ -809,6 +818,7 @@ def apply(mutation: Mutation) -> None:
 
 def restore(mutation: Mutation) -> None:
     run(["git", "checkout", "--", mutation.file])
+    (REPO_ROOT / ARTIFACT).unlink(missing_ok=True)
 
 
 #: `test result: ok. 3 passed; 0 failed; ...`
@@ -858,7 +868,7 @@ def script_check_failed(command: list[str], duckdb: str) -> tuple[bool, str]:
     to be measured by running it. `--extension` builds are done first when the
     command needs one.
     """
-    if any("--extension" in argument for argument in command):
+    if any(ARTIFACT in argument for argument in command):
         built = run(["make", "extension"])
         if built.returncode != 0:
             raise RanNothing(f"the mutated tree did not build:\n{built.stdout}{built.stderr}")
