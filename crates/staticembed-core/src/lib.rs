@@ -20,9 +20,10 @@
 //!   not two: the second waits for the first. Without that, a scan at DuckDB's
 //!   default thread count reported 29 encodes for a ten-distinct-value column.
 //! * [`embed`] builds its vector from at most [`model::MAX_TOKENS`] tokens of
-//!   `text`; anything past that is discarded before the mean, and the vector
-//!   that comes back is full width and unit norm either way — nothing about it
-//!   says content was dropped. [`is_truncated`] is how a caller finds out.
+//!   `text`, and from a bounded number of its characters before that; anything
+//!   past either is discarded before the mean, and the vector that comes back
+//!   is full width and unit norm either way — nothing about it says content was
+//!   dropped. [`is_truncated`] is how a caller finds out.
 //! * Nothing here reads a file or opens a socket after compilation.
 
 pub mod cache;
@@ -121,13 +122,16 @@ pub fn dim() -> Result<usize, String> {
     Ok(model::bundled()?.dim())
 }
 
-/// Whether [`embed`] would discard content of `text`: it tokenises to more ids
-/// than the model accepts, so the excess is truncated before pooling and the
-/// vector `embed` returns does not reflect all of `text`.
+/// Whether [`embed`] discarded content of `text`: it pooled fewer ids than the
+/// whole of `text` would have given it, so the vector it returns does not
+/// reflect all of `text`.
 ///
-/// Not cached: this reads the tokenizer, not the model's weights, so it is
-/// already far cheaper than an encode and there is nothing here that repeating
-/// a query would save.
+/// Not cached, and not always cheaper than an encode. It tokenises without
+/// pooling, which is the cheaper half of an encode — but for text past the
+/// character cut it has to tokenise the whole string, where [`embed`] stops
+/// reading at the cut. That is the price of answering "did anything get lost"
+/// rather than "did a cut fire": a text can be far past the cut and have lost
+/// nothing, and only reading past it can tell the two apart.
 pub fn is_truncated(text: &str) -> Result<bool, String> {
     Ok(model::bundled()?.is_truncated(text))
 }

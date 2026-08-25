@@ -32,14 +32,18 @@
 //!
 //! # Truncation
 //!
-//! `embed` builds its vector from at most 512 tokens of `text`; anything past
-//! that is discarded before the mean, and the vector that comes back is full
-//! width and unit norm either way, so a truncated result looks exactly like a
-//! complete one. For text made of unusually long, dense tokens — URLs,
-//! run-together identifiers, compound words — the cut can land well before 512
-//! tokens are reached. `embed_is_truncated(text)` answers "did this happen"
-//! directly, without asking the caller to know the limit is 512, or where else
-//! it might bite: `embed_is_truncated(NULL)` is `NULL`, matching `embed(NULL)`.
+//! `embed` builds its vector from at most 512 tokens of `text`, and from a
+//! bounded number of its characters before that; anything past either is
+//! discarded before the mean, and the vector that comes back is full width and
+//! unit norm either way, so a truncated result looks exactly like a complete
+//! one. Which limit bites first is a property of the text: for URLs,
+//! run-together identifiers and compound words the character cut lands well
+//! before 512 tokens are reached, and for Korean the token cap arrives after a
+//! few hundred characters. `embed_is_truncated(text)` answers "did this
+//! happen" directly, without asking the caller to know either limit — and it
+//! answers no for a text that is past a cut but lost nothing to it, which is
+//! the question an analyst is actually asking. `embed_is_truncated(NULL)` is
+//! `NULL`, matching `embed(NULL)`.
 
 use std::error::Error;
 use std::ffi::CString;
@@ -186,10 +190,11 @@ impl VScalar for Embed {
 
 /// `embed_is_truncated(text VARCHAR) → BOOLEAN`
 ///
-/// True if `embed(text)` had to drop content, so the vector it returns does
-/// not reflect all of `text` — even though it is full width and unit norm like
-/// any other. See the module docs' *Truncation* section for the limit and what
-/// a caller does with this.
+/// True if `embed(text)` dropped content, so the vector it returns does not
+/// reflect all of `text` — even though it is full width and unit norm like any
+/// other. False for a text that ran past a limit without losing an id to it.
+/// See the module docs' *Truncation* section for the limits and what a caller
+/// does with this.
 struct IsTruncated;
 
 impl VScalar for IsTruncated {

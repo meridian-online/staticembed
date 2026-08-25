@@ -299,10 +299,13 @@ impl Model {
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
         // The whole text and the cap, handed to upstream together. Both cuts
         // are then upstream's to apply, to a string this crate has not touched
-        // — which is what makes this call `encode_single`'s call, and the only
-        // way it can differ from one is if `MAX_TOKENS` stops being 512.
-        // `embed_matches_the_upstream_convenience_wrapper_it_replaced` is that
-        // one remaining difference, pinned.
+        // — which is what makes this `encode_single`'s own call.
+        // `encode_with_args` takes two arguments besides the text: the cap,
+        // which `encode_single` hard-codes at 512, and the batch size, which
+        // chunks a one-sentence slice into one chunk whatever it is. So this
+        // and `encode_single` can differ only in `MAX_TOKENS`, and
+        // `embed_is_byte_identical_to_the_upstream_wrapper_it_replaced` pins
+        // that.
         let sentence = [text.to_string()];
         let vector = self
             .inner
@@ -618,21 +621,24 @@ mod tests {
 
     /// The corpus every truncation assertion below reads.
     ///
-    /// One list rather than a set of inputs per test, because the failures this
-    /// card is made of were all the same failure: a mechanism checked only
-    /// against inputs chosen to suit it. A probe of one repeated token could
-    /// not show truncation at all — the mean of 512 copies of a vector is the
-    /// mean of 513 copies. `"steel "` is six characters per token against a
-    /// vocabulary median of exactly six, so the character cut and the token cut
-    /// land on the same repetition and no count exists where only one fires.
-    /// And no byte above U+007F appeared in any test input in this repository,
-    /// which is why an implementation that sliced the source text at a token
-    /// offset passed everything while disagreeing with upstream on Korean.
+    /// One list rather than a set of inputs per test, because three defects
+    /// have now been shipped past this file's suite and they were the same
+    /// defect: a mechanism checked against inputs chosen to suit it. A probe of
+    /// one repeated token cannot show truncation at all — the mean of 512
+    /// copies of a vector is the mean of 513 copies. `"steel "` is six
+    /// characters per token against a vocabulary median of exactly six, so the
+    /// character cut and the token cut land on the same repetition and no count
+    /// exists where one fires without the other. And until this list existed,
+    /// no test input in this repository — in `src`, in `tests/` or in
+    /// `test/sql/` — carried a byte above U+007F, which is why an
+    /// implementation that sliced the source text at a token offset passed the
+    /// suite while disagreeing with upstream on Korean.
     fn probes() -> Vec<Probe> {
         // One Hangul syllable. `BertNormalizer` runs NFD with accent stripping,
         // so it decomposes into its jamo — three tokens for this syllable, two
-        // for one with no final consonant — every one of which is in the
-        // vocabulary while the composed syllable is not.
+        // for one with no final consonant. The jamo are in the vocabulary and
+        // the composed syllable is not: 70 jamo appear in it, and no syllable
+        // from the U+AC00 block does.
         let hangul = "한 ";
         // One in-vocabulary CJK ideograph: one token, three bytes, and no
         // decomposition, which is why Chinese and Japanese passed the offset
@@ -723,9 +729,10 @@ mod tests {
                 true,
                 true,
             ),
-            // 4900 characters, every one of them outside the vocabulary. The
-            // character cut fires and takes 1828 characters with it, and not
-            // one id the mean would have seen: nothing was clipped.
+            // 3500 characters, none of them a token this vocabulary carries:
+            // 2000 raw ids, all of them the unknown-token id, and 0 that reach
+            // the mean. The character cut fires and takes 428 characters with
+            // it, and not one id the mean would have seen.
             probe(
                 "cjk outside the vocabulary, past the character cut",
                 "工業製品 ".repeat(700),
@@ -777,11 +784,13 @@ mod tests {
     /// `encode_single` makes with its own hard-coded 512, so the two differ
     /// only if `MAX_TOKENS` stops being 512 — the batch size is the other
     /// argument and a one-sentence slice is one chunk at any of them. That is
-    /// the point of the shape: the previous two rounds cut the text themselves
-    /// and passed upstream a pre-cut string, which is what gave them room to
-    /// disagree with it, and what this pins is that there is no longer any such
-    /// room. The Hangul probes are here as the regression guard for the round
-    /// that did: they were the only inputs that disagreed.
+    /// the point of the shape: two earlier versions of this file cut the text
+    /// themselves and passed upstream a pre-cut string, which is what gave them
+    /// room to disagree with it, and what this pins is that there is no longer
+    /// any such room. The Hangul probes are the regression guard for the
+    /// version that did — measured against the merged build, ASCII, Japanese,
+    /// Chinese, accented French and emoji agreed with it byte for byte and
+    /// Korean did not.
     #[test]
     fn embed_is_byte_identical_to_the_upstream_wrapper_it_replaced() {
         let model = bundled().expect("the bundled model loads");
@@ -865,11 +874,12 @@ mod tests {
 
     /// The same property, on inputs nobody chose.
     ///
-    /// The table above is a list of cases somebody thought of, and every round
-    /// of this card was lost to the case nobody thought of: a filler that could
-    /// not show truncation, a corpus with no byte above U+007F in any input, an
-    /// offset slice that only Hangul broke. Adding the case that was missed
-    /// buys the next one. This generates its inputs instead — 200 texts drawn
+    /// The table above is a list of cases somebody thought of, and each defect
+    /// this file has carried was the case nobody thought of: a filler that
+    /// could not show truncation, a corpus with no byte above U+007F in any
+    /// input, an offset slice that Hangul broke. Adding the case that was
+    /// missed buys the next one. This generates its inputs instead — 200 texts
+    /// drawn
     /// from a mixed alphabet of ASCII words, Hangul, in- and out-of-vocabulary
     /// CJK, kana, accented Latin, runic, emoji, a URL, an identifier and runs
     /// of whitespace, at lengths that straddle both cuts — and asserts the same

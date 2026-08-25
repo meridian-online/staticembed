@@ -20,8 +20,9 @@ model2vec-rs = { version = "0.2.1", default-features = false, features = ["local
 # `tokenizers` is a transitive dependency of model2vec-rs. It was originally
 # listed here only to choose its regex backend; `staticembed-core` now also
 # loads a second copy of the bundled tokenizer directly with it, to answer
-# "would `embed` truncate this text" without paying for a full encode —
-# `model2vec_rs::StaticModel` keeps its own tokenizer private. Its default
+# "did `embed` lose any of this text" — that needs the id list either side of
+# the cuts, and `model2vec_rs::StaticModel` keeps its own tokenizer, its unk
+# token and its median token length private with no accessor. Its default
 # features are `progressbar` + `onig` + `esaxx_fast`; `onig` and `esaxx_fast`
 # each build a bundled C/C++ library, and `tokenizers/http` would bring back the
 # TLS stack `model2vec-rs`'s default-features-off already removed. `fancy-regex`

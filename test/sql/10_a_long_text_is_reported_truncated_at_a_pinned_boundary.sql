@@ -1,15 +1,21 @@
--- AC1, AC3, AC4, AC5: `embed_is_truncated` is a SQL-level predicate an analyst
--- can put in a WHERE clause and a count(*), the boundary it reports is pinned
--- in both directions on BOTH of the limits `embed` applies — a token count and
--- a character count ahead of it — and `embed`'s own contract is unchanged by
--- its presence.
+-- AC1, AC3, AC4, AC5, AC6, AC7: `embed_is_truncated` is a SQL-level predicate
+-- an analyst can put in a WHERE clause and a count(*); the boundary it reports
+-- is pinned in both directions on BOTH of the limits `embed` applies — a token
+-- count and a character count ahead of it; it is false for a text that ran past
+-- a limit without losing anything to it; and `embed`'s own contract is
+-- unchanged by its presence.
 --
--- AC5's failure mode, spelled out: a probe of one token repeated cannot show
--- truncation, because the mean of 512 copies of a vector equals the mean of
--- 513 copies of it. Every probe below is filler plus one DISTINCT trailing
--- marker word, so a truncated vs. untruncated embed of it provably differ —
--- the same shape as the measurement behind this card, reproduced in SQL rather
--- than trusted from the Rust suite alone.
+-- Two ways a probe here can fail to test anything, both of them shipped before:
+--
+-- A probe of one token repeated cannot show truncation, because the mean of 512
+-- copies of a vector equals the mean of 513 copies of it. Each probe below is
+-- filler plus one DISTINCT trailing marker word, so a clipped and an unclipped
+-- embed of it provably differ.
+--
+-- A probe made only of ASCII cannot show which unit a limit counts in. The
+-- character cut and a byte cut are the same cut until the first character above
+-- U+007F, and until this file carried Hangul and CJK no test input anywhere in
+-- this repository had one.
 
 SELECT must('embed_is_truncated is registered as a scalar returning BOOLEAN',
     (SELECT count(*) FROM duckdb_functions()
@@ -93,21 +99,99 @@ SELECT must('past the character cut the marker was dropped before pooling, thoug
     IS NOT DISTINCT FROM
     (SELECT embed(filler_only) FROM char_boundary WHERE filler_reps = 147));
 
+-- AC6: both boundaries again, in scripts where a character is not a byte and a
+-- character is not a token.
+--
+-- `한 ` is one Hangul syllable and a space — 3 bytes, and 3 tokens, because the
+-- bundled tokenizer normalises with NFD and the syllable decomposes into jamo
+-- the vocabulary carries while the composed syllable is not in it. 170 of them
+-- is 510 tokens, and one `ok ` plus the marker brings it to exactly 512.
+CREATE TABLE hangul_boundary AS SELECT * FROM (VALUES
+    (512, repeat('한 ', 170) || 'ok ' || 'beacon', rtrim(repeat('한 ', 170) || 'ok ')),
+    (513, repeat('한 ', 170) || 'ok ok ' || 'beacon', rtrim(repeat('한 ', 170) || 'ok ok '))
+) AS t(tokens, with_marker, filler_only);
+
+SELECT must('Hangul at exactly 512 tokens is not reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM hangul_boundary WHERE tokens = 512) = false);
+SELECT must('at 512 tokens the Hangul probe marker still reaches the mean',
+    (SELECT embed(with_marker) FROM hangul_boundary WHERE tokens = 512)
+    IS DISTINCT FROM
+    (SELECT embed(filler_only) FROM hangul_boundary WHERE tokens = 512));
+SELECT must('Hangul one token past the cap is reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM hangul_boundary WHERE tokens = 513) = true);
+SELECT must('past the cap the Hangul probe marker was dropped before pooling',
+    (SELECT embed(with_marker) FROM hangul_boundary WHERE tokens = 513)
+    IS NOT DISTINCT FROM
+    (SELECT embed(filler_only) FROM hangul_boundary WHERE tokens = 513));
+
+-- AC6: a text inside the character cut and outside the same number of BYTES.
+-- `中` is one in-vocabulary ideograph: one token, one character, three bytes.
+-- 200 of them ahead of 130 reps of a 21-character two-token word puts the
+-- character count under 3072 and the byte count over it, at 461 tokens — so a
+-- cut that counted bytes would take the trailing marker and this one does not.
+CREATE TABLE byte_against_character AS SELECT * FROM (VALUES
+    (repeat('中', 200) || repeat('internationalization ', 130) || 'beacon',
+     repeat('中', 200) || rtrim(repeat('internationalization ', 130)))
+) AS t(with_marker, filler_only);
+
+SELECT must('the byte-against-character probe is under 3072 characters and over 3072 bytes',
+    (SELECT length(with_marker) FROM byte_against_character) = 2936
+    AND (SELECT octet_length(with_marker) FROM byte_against_character) = 3336);
+SELECT must('a text of 2936 characters in 3336 bytes is not reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM byte_against_character) = false);
+SELECT must('and its marker still reaches the mean, so nothing was dropped',
+    (SELECT embed(with_marker) FROM byte_against_character)
+    IS DISTINCT FROM
+    (SELECT embed(filler_only) FROM byte_against_character));
+
+-- AC9: 601 raw ids, 300 of them the unknown-token id that `embed` drops before
+-- it truncates. Counting those toward the cap would clip this text at 512 raw
+-- ids and take the marker; the 301 ids that reach the mean are well inside it.
+CREATE TABLE unknown_tokens AS SELECT * FROM (VALUES
+    (repeat('steel ᚠ ', 300) || 'beacon', rtrim(repeat('steel ᚠ ', 300)))
+) AS t(with_marker, filler_only);
+
+SELECT must('a text whose raw token count is past the cap but whose real one is not is not reported truncated',
+    (SELECT embed_is_truncated(with_marker) FROM unknown_tokens) = false);
+SELECT must('and its marker still reaches the mean',
+    (SELECT embed(with_marker) FROM unknown_tokens)
+    IS DISTINCT FROM
+    (SELECT embed(filler_only) FROM unknown_tokens));
+
+-- AC7: running past a limit is not the same as having lost something to it.
+-- Both of these are far past the 3072-character cut and neither loses an id.
+SELECT must('five thousand spaces is not reported truncated',
+    embed_is_truncated(repeat(' ', 5000)) = false);
+SELECT must('and embed of it discarded nothing: it is the zero vector',
+    list_max(embed(repeat(' ', 5000))) = 0.0
+    AND list_min(embed(repeat(' ', 5000))) = 0.0);
+SELECT must('3500 characters of CJK the vocabulary does not carry is not reported truncated',
+    embed_is_truncated(repeat('工業製品 ', 700)) = false);
+SELECT must('and that text really is past the character cut',
+    length(repeat('工業製品 ', 700)) = 3500);
+SELECT must('and embed of it is the zero vector, so there was nothing to drop',
+    list_max(embed(repeat('工業製品 ', 700))) = 0.0
+    AND list_min(embed(repeat('工業製品 ', 700))) = 0.0);
+
 -- AC1: a WHERE clause and a count(*) over a column, the way an analyst would
 -- actually ask the question.
+-- Rows 5 and 6 are the AC7 pair: long enough to be caught by anything that
+-- asks "is this text long" rather than "did this text lose anything".
 CREATE TABLE corpus AS SELECT * FROM (VALUES
     (1, 'a maker of industrial fasteners'),
     (2, repeat('steel ', 600) || 'logistics'),
     (3, 'a regional freight forwarder'),
-    (4, repeat('steel ', 900) || 'logistics')
+    (4, repeat('steel ', 900) || 'logistics'),
+    (5, repeat(' ', 5000)),
+    (6, repeat('工業製品 ', 700))
 ) AS t(id, description);
 
-SELECT must('count(*) over the column finds exactly the two long rows',
+SELECT must('count(*) over the column finds exactly the two rows that lost content',
     (SELECT count(*) FROM corpus WHERE embed_is_truncated(description)) = 2);
 SELECT must('the WHERE clause names the same two ids',
     (SELECT list_sort(list(id)) FROM corpus WHERE embed_is_truncated(description)) = [2, 4]);
-SELECT must('the short rows are excluded, not merely unmatched',
-    (SELECT list_sort(list(id)) FROM corpus WHERE NOT embed_is_truncated(description)) = [1, 3]);
+SELECT must('the rows that lost nothing are excluded, not merely unmatched',
+    (SELECT list_sort(list(id)) FROM corpus WHERE NOT embed_is_truncated(description)) = [1, 3, 5, 6]);
 
 -- AC4: embed() itself is unaffected by embed_is_truncated existing alongside
 -- it — same vectors as the untruncated-probe assertions above, and the width

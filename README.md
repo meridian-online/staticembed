@@ -56,7 +56,7 @@ SELECT embed(coalesce(description, '')) FROM corpus;
 
 `embed` builds its vector from at most **512 tokens** of `text` — roughly the first few hundred words of ordinary English for most prose. Anything past that is dropped before the mean is taken, not down-weighted, and the vector that comes back is full width and unit norm either way. Two rows whose descriptions agree up to the cut and then diverge completely embed to the same place, and nothing about the result tells you that happened.
 
-That 512-token figure is not the whole story for every kind of text. For text made of unusually long, dense tokens — URLs, camelCase or snake_case identifiers, run-together compound words, anything with few word breaks — the cut can land much earlier, over as few as a couple of thousand characters, well before 512 tokens are even reached. You do not need to reason about which case you are in: `embed_is_truncated` answers the question either way, which is the point of asking it instead of counting.
+That 512-token figure is not the whole story for every kind of text. Before it tokenises anything, `embed` cuts the raw string to a character count derived from the vocabulary — just over three thousand characters for this model. For text made of unusually long, dense tokens — URLs, camelCase or snake_case identifiers, run-together compound words, anything with few word breaks — that is the cut that bites, and it bites while the token count is still nowhere near 512. Non-Latin scripts move the balance the other way: a line of Korean is two or three tokens per character, so it reaches the token cap in a few hundred. You do not need to reason about which case you are in: `embed_is_truncated` answers the question either way, which is the point of asking it instead of counting.
 
 `embed_is_truncated(text)` is how you find out before you trust a result — a plain question, not a token count, so you never have to know the limit is 512, or where else it might bite, to ask it:
 
@@ -64,7 +64,9 @@ That 512-token figure is not the whole story for every kind of text. For text ma
 SELECT count(*) FROM corpus WHERE embed_is_truncated(description);
 ```
 
-`embed_is_truncated(NULL)` is `NULL`, the same as `embed(NULL)`, so it drops out of a `WHERE` clause the same way. Text with no in-vocabulary tokens at all — the empty string, whitespace — is never reported truncated: nothing was discarded, there was simply nothing past what fit.
+`embed_is_truncated(NULL)` is `NULL`, the same as `embed(NULL)`, so it drops out of a `WHERE` clause the same way.
+
+What it reports is whether `embed` pooled less of the text than the whole of it would have given, and that is not the same question as whether the text was long. Five thousand spaces is `false`. So is a column of characters this vocabulary does not carry, however far past the character cut it runs: the cut took nothing that would have reached the mean. It also costs more than `embed` does on a very long value — `embed` stops reading at the character cut and this has to look past it to know whether anything was there.
 
 ### What counts as the same string
 
