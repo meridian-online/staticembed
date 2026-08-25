@@ -603,6 +603,15 @@ mod tests {
     /// a clip could be visible in.
     const MARKER: &str = "beacon";
 
+    /// What `mixed_script_texts(200)` actually contains, measured. Exact rather
+    /// than floors: the seed is fixed and every step from it is deterministic,
+    /// so if a tokenizer bump moves one of these, the corpus the biconditional
+    /// was validated against is not the corpus being run.
+    const COVERAGE_CLIPPED: usize = 99;
+    const COVERAGE_INTACT: usize = 101;
+    const COVERAGE_TOKEN_CUT_ALONE: usize = 17;
+    const COVERAGE_BYTES_OVER_CHARACTERS_UNDER: usize = 50;
+
     /// A probe text and what this crate must say about it.
     struct Probe {
         name: &'static str,
@@ -896,6 +905,7 @@ mod tests {
         let mut clipped = 0usize;
         let mut clipped_under_the_character_cut = 0usize;
         let mut intact = 0usize;
+        let mut inside_the_cut_but_over_it_in_bytes = 0usize;
         for (index, text) in mixed_script_texts(200).into_iter().enumerate() {
             let reported = model.is_truncated(&text);
             let capped = model.embed(&text).expect("embed");
@@ -910,6 +920,14 @@ mod tests {
                 }
             } else {
                 intact += 1;
+                // The region a byte cut and a character cut disagree over:
+                // short enough in characters to survive the real cut, long
+                // enough in bytes to be taken by a cut that counted those, and
+                // far enough short of the token cap that neither cap hides the
+                // difference.
+                if text.chars().count() <= MAX_TOKENS * 6 && text.len() > MAX_TOKENS * 6 {
+                    inside_the_cut_but_over_it_in_bytes += 1;
+                }
             }
 
             assert_eq!(
@@ -938,12 +956,35 @@ mod tests {
         // is not the corpus being run, and that is worth reddening for.
         assert_eq!(
             (clipped, intact, clipped_under_the_character_cut),
-            (132, 68, 22),
+            (COVERAGE_CLIPPED, COVERAGE_INTACT, COVERAGE_TOKEN_CUT_ALONE),
             "the generated corpus no longer straddles the boundary it was built to straddle"
+        );
+        assert_eq!(
+            inside_the_cut_but_over_it_in_bytes, COVERAGE_BYTES_OVER_CHARACTERS_UNDER,
+            "the generated corpus no longer reaches the region a byte cut and a \
+             character cut disagree over, which is the region it was extended for"
         );
     }
 
     /// 200 mixed-script texts from a fixed seed, each ending in [`MARKER`].
+    ///
+    /// Two families, because a generator that draws its pieces evenly cannot
+    /// reach every region that matters and this one could not reach the region
+    /// the character cut lives in. Measured while writing it: the first family
+    /// alone left the byte-cut mutation alive across all 200 texts, because a
+    /// text long enough in bytes to cross 3072 was already long enough in
+    /// tokens to cross 512, so both a right and a wrong cut called it clipped.
+    ///
+    /// * a free mixture from the whole alphabet, at budgets straddling both
+    ///   cuts;
+    /// * texts that are heavy in bytes and light in tokens — a run of
+    ///   multi-byte characters ahead of words of ten or more characters each —
+    ///   which is the only shape that sits inside the character cut, outside
+    ///   the same number of bytes, and far short of the token cap at once.
+    ///
+    /// The count of texts landing in that second region is asserted by the
+    /// caller. Without that the generator is one edit away from the hole it was
+    /// written to close.
     fn mixed_script_texts(count: usize) -> Vec<String> {
         // Deliberately uneven in characters per token and in bytes per
         // character, because those two ratios are what decide which cut bites
@@ -967,6 +1008,28 @@ mod tests {
             "\u{1F701} ",
             "     ",
         ];
+        // Fifteen or more characters to the token, so a few thousand of them
+        // are still only a couple of hundred ids. Every one of these five is a
+        // single vocabulary entry except `internationalization`, which is two.
+        //
+        // A long word is not the same as a word with a high
+        // characters-per-token ratio, and this is where that distinction bites:
+        // the first version of this family used the URL and the identifier from
+        // `PIECES` and reached none of the region it was written for.
+        // `snake_case_identifier_name` is 27 characters and splits on every
+        // underscore, and the URL splits on every punctuation mark, so both are
+        // around three characters to the token — denser than ordinary prose,
+        // not sparser.
+        const SPARSE: [&str; 5] = [
+            "telecommunications ",
+            "responsibilities ",
+            "characteristics ",
+            "entrepreneurship ",
+            "internationalization ",
+        ];
+        // Three bytes each: one in the vocabulary, one that decomposes into
+        // three jamo, and two the vocabulary does not carry.
+        const WIDE: [&str; 4] = ["中", "한", "工", "\u{16A0}"];
         // Character budgets straddling the 3072-character cut and the lengths
         // at which the token cut bites for each script.
         const BUDGETS: [usize; 9] = [8, 300, 1200, 2900, 3050, 3071, 3080, 3400, 5200];
@@ -981,10 +1044,26 @@ mod tests {
 
         let mut texts = Vec::with_capacity(count);
         for index in 0..count {
-            let budget = BUDGETS[index % BUDGETS.len()] + next() % 64;
             let mut text = String::new();
-            while text.chars().count() < budget {
-                text.push_str(PIECES[next() % PIECES.len()]);
+            if index % 4 == 3 {
+                // Byte-heavy and token-light: 120 to 220 wide characters, then
+                // sparse words up to a budget that stays inside the character
+                // cut while the byte count passes it. 120 is the floor at which
+                // the two extra bytes each wide character costs carry the
+                // smallest budget here past 3072.
+                let wide = 120 + next() % 101;
+                for _ in 0..wide {
+                    text.push_str(WIDE[next() % WIDE.len()]);
+                }
+                let budget = 2850 + next() % 131;
+                while text.chars().count() < budget {
+                    text.push_str(SPARSE[next() % SPARSE.len()]);
+                }
+            } else {
+                let budget = BUDGETS[index % BUDGETS.len()] + next() % 64;
+                while text.chars().count() < budget {
+                    text.push_str(PIECES[next() % PIECES.len()]);
+                }
             }
             text.push_str(MARKER);
             texts.push(text);
