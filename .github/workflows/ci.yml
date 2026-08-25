@@ -94,7 +94,8 @@ jobs:
           python3 scripts/check_no_network_deps.py --self-test
           python3 scripts/check_no_network_deps.py --artifact build/staticembed.duckdb_extension
 
-      # Three copies of one signature is three chances to be wrong.
+      # Each copy of a signature is another chance to be wrong, and the copy on
+      # the registry page is the one a stranger reads before installing.
       - name: The documented surface matches the loaded catalog
         run: |
           python3 scripts/check_documented_surface.py --self-test

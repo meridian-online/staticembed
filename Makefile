@@ -63,9 +63,10 @@ no-network: extension
 	python3 scripts/check_no_network_deps.py --self-test
 	python3 scripts/check_no_network_deps.py --artifact $(EXTENSION)
 
-## The function table and STRUCT signatures written in README.md and the
-## module doc, against duckdb_functions() of a loaded build. Three copies of one
-## signature is three chances to be wrong, and the page was wrong.
+## The function table and STRUCT signatures written in README.md, the module doc
+## and description.yml — the registry page a stranger reads — against
+## duckdb_functions() of a loaded build. Each copy of a signature is another
+## chance to be wrong, and the page was wrong.
 documented-surface: extension
 	python3 scripts/check_documented_surface.py --self-test
 	python3 scripts/check_documented_surface.py --extension $(EXTENSION) --duckdb $(DUCKDB)
