@@ -30,16 +30,17 @@ const WEIGHTS: &[u8] = include_bytes!("../../../models/potion-base-8M/model.safe
 const TOKENIZER: &[u8] = include_bytes!("../../../models/potion-base-8M/tokenizer.json");
 const CONFIG: &[u8] = include_bytes!("../../../models/potion-base-8M/config.json");
 
-/// The token cap [`Model::embed`] truncates to before pooling: text that
-/// tokenises to more in-vocabulary ids than this has the excess dropped
-/// before the mean, and — because the cut this crate performs also mirrors
-/// the character-level pre-cut `model2vec_rs::StaticModel::encode` applies
-/// ahead of tokenising — text made of long, sparse tokens can lose content
-/// well before it reaches 512 of them. See [`Truncation`] for the mechanism
-/// and [`Model::is_truncated`] for how a caller finds out.
+/// The token cap [`Model::embed`] hands to `model2vec_rs`: text that tokenises
+/// to more in-vocabulary ids than this has the excess dropped before the mean.
+/// It is not the only way content is lost — `encode_with_args` also cuts the
+/// raw string to `MAX_TOKENS * median_token_length` characters before it
+/// tokenises anything, so text made of long, sparse tokens can lose content
+/// well before it reaches 512 of them. See [`Truncation`] for both cuts and
+/// [`Model::is_truncated`] for how a caller finds out.
 ///
 /// This is `model2vec_rs::StaticModel::encode`'s own default, `Some(512)`,
-/// declared here so this crate has exactly one place that says "512".
+/// declared here so this crate has exactly one place that says "512" and so
+/// that moving it moves `embed` as well as the predicate.
 pub const MAX_TOKENS: usize = 512;
 
 /// Domain tag mixed into the model key so the digest cannot be confused with a
@@ -73,30 +74,33 @@ pub struct Model {
     truncation: Truncation,
 }
 
-/// The one place this crate decides how much of a text `embed` will use.
+/// Whether `model2vec_rs` dropped any of a text before pooling it.
 ///
-/// `model2vec_rs::StaticModel::encode_with_args` performs two cuts when asked
-/// for at most `max_tokens` ids: first a **character**-level pre-cut of the
-/// raw string, to `max_tokens * median_token_length` characters — a
-/// performance guard, so an arbitrarily long text is not tokenised in full
-/// just to have the result thrown away — and only then a **token**-level cut
-/// of the tokenised, out-of-vocabulary-filtered result, to `max_tokens` ids.
-/// Both steps are private with no accessor, and an earlier version of this
-/// type reimplemented them separately from what decided `is_truncated`: two
-/// copies of the same arithmetic, expected to stay in step, with nothing
-/// forcing them to. One of those copies missed the character cut entirely,
-/// and a fix that recomputed it independently coincided with the token cap on
-/// a text built of one token repeated, reporting "not clipped" no matter how
-/// long the text ran.
+/// **[`Model::embed`] does not use this type.** It hands the whole text and
+/// `Some(MAX_TOKENS)` to `model2vec_rs::StaticModel::encode_with_args` and
+/// takes what comes back, which is the call `encode_single` makes — so the
+/// vectors are upstream's own and there is no second implementation of the
+/// cuts for them to disagree with. Two earlier versions of this file did the
+/// cutting here and handed `encode_with_args` a pre-cut string with no limit;
+/// the first missed the character cut, and the second reconstructed the token
+/// cut as a byte-offset slice of the source text, which is faithful only if
+/// token index maps injectively to source span. Under this tokenizer it does
+/// not: `BertNormalizer` runs NFD, every Hangul syllable decomposes into two
+/// or three jamo tokens reporting one shared span, and a boundary inside such
+/// a run kept all of them. `embed` then pooled more tokens than upstream, at a
+/// cosine of 0.999994 — a difference that reads as rounding.
 ///
-/// So this type does not answer a question about `embed`; it **performs the
-/// truncation `embed` uses**. [`Model::embed`] calls [`Truncation::surviving_prefix`]
-/// to get the exact text it will tokenise, and re-tokenises that with no
-/// further limit — the character and token cuts both already applied.
-/// [`Model::is_truncated`] asks the same method the same question and compares
-/// lengths. There is one implementation of "how much of this text survives",
-/// and both callers read it; neither can drift from what the other sees,
-/// because they are the same call.
+/// What is left for this type is the question upstream does not answer: given
+/// a text, did the pipeline pool fewer ids than the whole text would have
+/// given? `encode_with_args` performs two cuts when asked for at most
+/// `max_tokens` ids — first a **character** pre-cut of the raw string to
+/// `max_tokens * median_token_length` characters, a performance guard so an
+/// arbitrarily long text is not tokenised in full only to be thrown away, and
+/// then a **token** cut of the tokenised, out-of-vocabulary-filtered result to
+/// `max_tokens` ids. Both are private with no accessor, so
+/// [`Truncation::truncates`] reproduces them and compares the id list they
+/// leave against the id list the whole text gives. It reaches no byte offset
+/// and reconstructs no substring: the only thing it ever compares is ids.
 ///
 /// It carries its own [`Tokenizer`], loaded from the identical `TOKENIZER`
 /// bytes [`Model`] itself loads from, because `model2vec_rs::StaticModel`
@@ -145,77 +149,71 @@ impl Truncation {
     /// Reproduce `model2vec_rs`'s private character-level pre-cut: at most
     /// `max_tokens * median_token_length` characters of `text`, on a char
     /// boundary.
+    ///
+    /// Characters, not bytes, and the two part company on the first character
+    /// above U+007F. `median_token_length` is itself measured in bytes — that
+    /// mismatch is upstream's, reproduced rather than corrected, because the
+    /// question here is what `encode_with_args` did and not what it should
+    /// have done.
     fn char_truncate(text: &str, max_tokens: usize, median_token_length: usize) -> &str {
         text.char_indices()
             .nth(max_tokens.saturating_mul(median_token_length))
             .map_or(text, |(byte_idx, _)| &text[..byte_idx])
     }
 
-    /// The exact prefix of `text` that survives both of `model2vec_rs`'s
-    /// truncation steps — the substring [`Model::embed`] actually tokenises.
+    /// Every id of `text` that reaches `pool_ids`, before any token cut:
+    /// tokenise, then drop the unknown-token id the way `encode_with_args`
+    /// does on its way to the mean.
     ///
-    /// Applies the character cut, tokenises what remains, drops
-    /// out-of-vocabulary ids the way `encode_with_args` does, and — if more
-    /// than `max_tokens` ids are still left — cuts back to the byte offset
-    /// where the `max_tokens`-th surviving id ends. `Encoding::get_offsets`
-    /// reports that offset in the *original* (pre-normalisation) string, which
-    /// is what makes slicing `text` at it, rather than the encoder's internal
-    /// token buffer, exact.
-    ///
-    /// This calls [`Tokenizer::encode`], not `encode_fast`: `encode_fast`
-    /// documents that it "does not compute offsets", and returns `(0, 0)` for
-    /// every one — a first version of this method used it and sliced every
-    /// over-cap text down to an empty string, which `embed` then reported as
-    /// the zero vector. `model2vec_rs`'s own pooling path uses the fast,
-    /// offset-free encode (it only ever needs ids), so this is the one place
-    /// in this crate that pays for the slower call, and only because this is
-    /// the one place that needs where a token sits in the original string.
-    fn surviving_prefix<'a>(&self, text: &'a str, max_tokens: usize) -> &'a str {
-        let char_cut = Self::char_truncate(text, max_tokens, self.median_token_length);
-        let Ok(encoding) = self.tokenizer.encode(char_cut, false) else {
-            // A failure here fails inside `embed` too, when it re-tokenises
-            // this same text — this degrades rather than panics because it
-            // also backs the `is_truncated` predicate, which has no fallible
-            // path to report through.
-            return char_cut;
+    /// [`Tokenizer::encode_fast`] is the call upstream makes
+    /// (`encode_batch_fast`), and it is safe here for the reason it was not
+    /// safe before: it documents that it does not compute offsets and returns
+    /// `(0, 0)` for every token, and nothing in this file reads an offset any
+    /// more.
+    fn surviving_ids(&self, text: &str) -> Vec<u32> {
+        let Ok(encoding) = self.tokenizer.encode_fast(text, false) else {
+            // Upstream panics here (`.expect("tokenization failed")`), which
+            // would take the whole DuckDB session with it. Reporting no ids
+            // makes both sides of the comparison in `truncates` empty, so a
+            // text the tokenizer cannot handle is reported as losing nothing
+            // rather than as losing everything.
+            return Vec::new();
         };
-
-        let ids = encoding.get_ids();
-        let offsets = encoding.get_offsets();
-        let surviving: Vec<usize> = ids
-            .iter()
-            .enumerate()
-            .filter(|&(_, &id)| self.unk_token_id.is_none_or(|unk| id as usize != unk))
-            .map(|(i, _)| i)
-            // One more than the cap is all that's needed to know the cap was
-            // reached; collecting further would count ids the pooled mean
-            // never sees anyway.
-            .take(max_tokens + 1)
-            .collect();
-
-        if surviving.len() <= max_tokens {
-            // `token_ids.truncate(max_tok)` is a no-op here: nothing past the
-            // last kept id is dropped, so the char cut was the only cut, if
-            // any. Trailing text that produced no surviving id — whitespace, a
-            // trailing run of out-of-vocabulary symbols — is not content that
-            // was dropped: it would never have reached the mean regardless.
-            return char_cut;
+        let mut ids = encoding.get_ids().to_vec();
+        if let Some(unk) = self.unk_token_id {
+            ids.retain(|&id| id as usize != unk);
         }
-
-        // More than `max_tokens` ids survived the filter, so `encode_with_args`
-        // truncates the list to the first `max_tokens` of them before pooling.
-        // Cut the text back to where that last kept id ends.
-        &char_cut[..offsets[surviving[max_tokens - 1]].1]
+        ids
     }
 
-    /// True if [`Model::embed`] discards part of `text`: the prefix that
-    /// survives both truncation steps is shorter than `text` itself.
+    /// True if [`Model::embed`] pooled fewer ids for `text` than the whole of
+    /// `text` would have given it.
     ///
-    /// A `false` for text with no in-vocabulary tokens at all — the empty
-    /// string, whitespace, symbols outside the vocabulary — is correct, not a
-    /// false negative: nothing was discarded, there was simply nothing there.
+    /// Not "did a cut fire" — the character cut fires for any text over
+    /// `max_tokens * median_token_length` characters whether or not a single
+    /// token was lost with it, so 5,000 spaces would answer yes to that
+    /// question while `embed` discarded nothing. The two id lists are the
+    /// answer to the question a caller is actually asking, and they are equal
+    /// exactly when the cuts took nothing that would have reached the mean:
+    /// trailing whitespace, a run of symbols outside the vocabulary, a text
+    /// with no in-vocabulary token in it at all.
     fn truncates(&self, text: &str, max_tokens: usize) -> bool {
-        self.surviving_prefix(text, max_tokens).len() < text.len()
+        // The whole text, neither cut applied.
+        let whole = self.surviving_ids(text);
+
+        let char_cut = Self::char_truncate(text, max_tokens, self.median_token_length);
+        // When the character cut took nothing, `char_cut` *is* `text` and
+        // tokenising it again would return `whole` a second time, at the cost
+        // of a second pass over the string. That is the only thing this branch
+        // avoids: both arms produce the same ids.
+        let mut pooled = if char_cut.len() == text.len() {
+            whole.clone()
+        } else {
+            self.surviving_ids(char_cut)
+        };
+        pooled.truncate(max_tokens);
+
+        pooled != whole
     }
 }
 
@@ -299,25 +297,25 @@ impl Model {
     /// that fails is recoverable, and a column of zero vectors that looks like
     /// data is not.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>, String> {
-        // `Truncation::surviving_prefix` has already applied both of
-        // `model2vec_rs`'s cuts (character, then token), so `encode_with_args`
-        // is called with `None` here rather than `Some(MAX_TOKENS)` — a second
-        // limit would either be redundant or, worse, a second place this crate
-        // could disagree with itself about how much of `text` it used.
-        let used = self.truncation.surviving_prefix(text, MAX_TOKENS);
-        let sentence = [used.to_string()];
+        // The whole text and the cap, handed to upstream together. Both cuts
+        // are then upstream's to apply, to a string this crate has not touched
+        // — which is what makes this call `encode_single`'s call, and the only
+        // way it can differ from one is if `MAX_TOKENS` stops being 512.
+        // `embed_matches_the_upstream_convenience_wrapper_it_replaced` is that
+        // one remaining difference, pinned.
+        let sentence = [text.to_string()];
         let vector = self
             .inner
-            .encode_with_args(&sentence, None, 1)
+            .encode_with_args(&sentence, Some(MAX_TOKENS), 1)
             .into_iter()
             .next()
             .unwrap_or_default();
         conform(vector, self.dim)
     }
 
-    /// Whether embedding `text` discards content: the prefix [`Model::embed`]
-    /// actually tokenises is shorter than `text`, so the excess never reached
-    /// the mean.
+    /// Whether embedding `text` discards content: [`Model::embed`] pooled
+    /// fewer ids than the whole of `text` would have given it, so the excess
+    /// never reached the mean.
     ///
     /// The vector `embed` returns is full width and unit norm whether or not
     /// this is true — nothing about it says content was dropped, which is the
@@ -598,64 +596,416 @@ mod tests {
         );
     }
 
-    /// AC4 at the engine: `Model::embed` now calls `encode_with_args` directly
-    /// with this crate's own [`MAX_TOKENS`] rather than model2vec-rs's
-    /// `encode_single` convenience wrapper (which hard-codes its own `512`).
-    /// Pinned against the old call path so that refactor is provably a no-op.
+    /// The one token that appears in no probe's filler, appended to every probe
+    /// a clip could be visible in.
+    const MARKER: &str = "beacon";
+
+    /// A probe text and what this crate must say about it.
+    struct Probe {
+        name: &'static str,
+        text: String,
+        /// What [`Model::is_truncated`] must report for it.
+        clipped: bool,
+        /// Whether a clip of this text would show in the vector it embeds to.
+        ///
+        /// True for every probe ending in [`MARKER`]: a cut of either kind
+        /// removes a *suffix*, so a clip of any size takes the marker with it,
+        /// and the marker is a token the rest of the probe does not contain —
+        /// so the mean moves. False only where there is no in-vocabulary token
+        /// to lose in the first place, and nothing a vector could show.
+        observable: bool,
+    }
+
+    /// The corpus every truncation assertion below reads.
+    ///
+    /// One list rather than a set of inputs per test, because the failures this
+    /// card is made of were all the same failure: a mechanism checked only
+    /// against inputs chosen to suit it. A probe of one repeated token could
+    /// not show truncation at all — the mean of 512 copies of a vector is the
+    /// mean of 513 copies. `"steel "` is six characters per token against a
+    /// vocabulary median of exactly six, so the character cut and the token cut
+    /// land on the same repetition and no count exists where only one fires.
+    /// And no byte above U+007F appeared in any test input in this repository,
+    /// which is why an implementation that sliced the source text at a token
+    /// offset passed everything while disagreeing with upstream on Korean.
+    fn probes() -> Vec<Probe> {
+        // One Hangul syllable. `BertNormalizer` runs NFD with accent stripping,
+        // so it decomposes into its jamo — three tokens for this syllable, two
+        // for one with no final consonant — every one of which is in the
+        // vocabulary while the composed syllable is not.
+        let hangul = "한 ";
+        // One in-vocabulary CJK ideograph: one token, three bytes, and no
+        // decomposition, which is why Chinese and Japanese passed the offset
+        // slice that Korean broke.
+        let cjk = "中";
+        // 21 characters for 2 tokens — 10.5 per token against the median 6, so
+        // the character cut reaches it long before the token cut does.
+        let dense = "internationalization ";
+
+        let probe = |name, text: String, clipped, observable| Probe {
+            name,
+            text,
+            clipped,
+            observable,
+        };
+
+        vec![
+            probe("the empty string", String::new(), false, false),
+            probe(
+                "ordinary english",
+                "a manufacturer of industrial fasteners in Sheffield".into(),
+                false,
+                false,
+            ),
+            // 511 filler tokens plus the marker is exactly MAX_TOKENS, and
+            // 1539 characters — half the character cut, so this pair moves the
+            // token cut alone.
+            probe(
+                "ascii exactly at the token cap",
+                format!("{}{MARKER}", "ok ".repeat(MAX_TOKENS - 1)),
+                false,
+                true,
+            ),
+            probe(
+                "ascii one token past the cap",
+                format!("{}{MARKER}", "ok ".repeat(MAX_TOKENS)),
+                true,
+                true,
+            ),
+            // 3051 characters at 291 tokens, then 3093 characters at 295: the
+            // character cut fires while the token count is 200 short of the
+            // cap, which a token count alone cannot see.
+            probe(
+                "dense ascii under the character cut",
+                format!("{}{MARKER}", dense.repeat(145)),
+                false,
+                true,
+            ),
+            probe(
+                "dense ascii past the character cut",
+                format!("{}{MARKER}", dense.repeat(147)),
+                true,
+                true,
+            ),
+            // 170 syllables is 510 jamo tokens; one ascii token and the marker
+            // bring it to exactly MAX_TOKENS, and one more past it.
+            probe(
+                "hangul exactly at the token cap",
+                format!("{}ok {MARKER}", hangul.repeat(170)),
+                false,
+                true,
+            ),
+            probe(
+                "hangul one token past the cap",
+                format!("{}ok ok {MARKER}", hangul.repeat(170)),
+                true,
+                true,
+            ),
+            // 171 syllables is 513 jamo, so the cut falls between the second
+            // and third jamo of the last syllable — the case a byte-offset
+            // slice of the source text cannot express, because all three jamo
+            // report the one span the composed syllable occupied.
+            probe(
+                "hangul clipped inside one syllable's jamo",
+                format!("{}{MARKER}", hangul.repeat(171)),
+                true,
+                true,
+            ),
+            probe(
+                "hangul far past the cap",
+                format!("{}{MARKER}", hangul.repeat(400)),
+                true,
+                true,
+            ),
+            probe(
+                "cjk past the token cap",
+                format!("{}{MARKER}", format!("{cjk} ").repeat(600)),
+                true,
+                true,
+            ),
+            // 4900 characters, every one of them outside the vocabulary. The
+            // character cut fires and takes 1828 characters with it, and not
+            // one id the mean would have seen: nothing was clipped.
+            probe(
+                "cjk outside the vocabulary, past the character cut",
+                "工業製品 ".repeat(700),
+                false,
+                false,
+            ),
+            // 2936 characters in 3336 bytes at 461 tokens: under both of the
+            // cuts upstream applies, and over a cut that counted bytes. A
+            // character cut and a byte cut are the same thing until the first
+            // character above U+007F, and this repository had none.
+            probe(
+                "more bytes than the character cut but fewer characters",
+                format!("{}{}{MARKER}", cjk.repeat(200), dense.repeat(130)),
+                false,
+                true,
+            ),
+            // 601 raw ids, 300 of them the unknown-token id that
+            // `encode_with_args` drops before it truncates. Counting them
+            // toward the cap would clip this at 512 raw ids; upstream pools
+            // all 301 real ones and clips nothing.
+            probe(
+                "more raw tokens than the cap, half of them unknown",
+                format!("{}{MARKER}", "steel \u{16A0} ".repeat(300)),
+                false,
+                true,
+            ),
+            // AC7, twice. Both are far past the character cut and neither
+            // loses an id: `embed` of either is the zero vector with or
+            // without the cap.
+            probe("five thousand spaces", " ".repeat(5000), false, false),
+            probe(
+                "four thousand runic characters",
+                "\u{16A0}".repeat(4000),
+                false,
+                false,
+            ),
+        ]
+    }
+
+    /// AC4: `embed` returns what it returned at `b1c1e03`, for every probe.
+    ///
+    /// `conform(inner.encode_single(text), dim)` *is* the body `embed` had at
+    /// `b1c1e03`, so this is that implementation and this one answering the
+    /// same inputs in the same process — a stronger comparison than two builds,
+    /// because there is no second build to differ for another reason.
+    ///
+    /// It can now fail in exactly one way. `embed` hands the untouched text and
+    /// `Some(MAX_TOKENS)` to `encode_with_args`, which is the call
+    /// `encode_single` makes with its own hard-coded 512, so the two differ
+    /// only if `MAX_TOKENS` stops being 512 — the batch size is the other
+    /// argument and a one-sentence slice is one chunk at any of them. That is
+    /// the point of the shape: the previous two rounds cut the text themselves
+    /// and passed upstream a pre-cut string, which is what gave them room to
+    /// disagree with it, and what this pins is that there is no longer any such
+    /// room. The Hangul probes are here as the regression guard for the round
+    /// that did: they were the only inputs that disagreed.
     #[test]
-    fn embed_matches_the_upstream_convenience_wrapper_it_replaced() {
+    fn embed_is_byte_identical_to_the_upstream_wrapper_it_replaced() {
         let model = bundled().expect("the bundled model loads");
-
-        // A text made of one token repeated cannot exercise this: the mean of
-        // 511 copies of a vector equals the mean of 512 copies of it, so a
-        // wrong cap on one side would still pass. This text has a token that
-        // is inside one cap and outside the other — a marker as the 512th
-        // token — so a one-token disagreement between the two call paths is
-        // something this comparison can actually see. It also happens to sit
-        // 3 characters past the 3072-character cut, so it exercises the
-        // character-cut path as well as the token-cut path.
-        let mut boundary_marker = "steel ".repeat(MAX_TOKENS - 1);
-        boundary_marker.push_str("logistics");
-
-        // The reachable class the round's defect was found in: text whose
-        // characters-per-token sits above the vocabulary median, so the
-        // character cut fires while the token count is still far under
-        // MAX_TOKENS. `model.inner.encode_single` runs the unmodified upstream
-        // path — both cuts, on the original call shape — so equality here is
-        // the proof that reading `Truncation::surviving_prefix` back through a
-        // fresh `encode_with_args(None)` reproduces it exactly, not just for
-        // the cases this crate's own truncation logic was designed against.
-        let dense_word = "internationalization ";
-        let just_under_the_char_cut = dense_word.repeat(146);
-        let just_over_the_char_cut = dense_word.repeat(147);
-        let far_over_the_char_cut = dense_word.repeat(300);
-
-        for text in [
-            "",
-            "a foundry casting valve bodies",
-            &"steel ".repeat(600),
-            boundary_marker.as_str(),
-            just_under_the_char_cut.as_str(),
-            just_over_the_char_cut.as_str(),
-            far_over_the_char_cut.as_str(),
-        ] {
+        for probe in probes() {
             assert_eq!(
-                model.embed(text).expect("embed"),
-                conform(model.inner.encode_single(text), model.dim()).expect("conform"),
-                "{} chars, {:?} preview",
-                text.chars().count(),
-                &text[..text.len().min(40)]
+                model.embed(&probe.text).expect("embed"),
+                conform(model.inner.encode_single(&probe.text), model.dim()).expect("conform"),
+                "{}: {} chars",
+                probe.name,
+                probe.text.chars().count()
             );
         }
     }
 
-    /// Nothing to average is not clipped: a text with no in-vocabulary tokens
-    /// has nothing dropped, it simply never had anything past the limit.
+    /// Everything `embed` would have pooled with no cap at all — upstream's own
+    /// call with `None`, which skips both cuts and keeps filtering the unknown
+    /// token.
+    ///
+    /// This is the oracle for what `is_truncated` claims. It is upstream
+    /// answering, not this crate: a predicate that reproduces the cuts wrongly
+    /// disagrees with it, whichever direction the mistake runs in.
+    fn embed_with_no_cap(model: &Model, text: &str) -> Vec<f32> {
+        conform(
+            model
+                .inner
+                .encode_with_args(&[text.to_string()], None, 1)
+                .into_iter()
+                .next()
+                .unwrap_or_default(),
+            model.dim(),
+        )
+        .expect("conform")
+    }
+
+    /// AC1, AC3, AC6, AC7, AC9: `is_truncated` is true exactly when the cap
+    /// changed the vector, on a corpus that can tell the two apart.
+    ///
+    /// Two assertions per probe, and the second is the one that does not
+    /// depend on anybody having written down the right answer:
+    ///
+    /// * the reported verdict equals the pinned one, which is what makes a cap
+    ///   that moves by one redden;
+    /// * the reported verdict equals `embed(text) != embed_with_no_cap(text)`,
+    ///   which is upstream's own answer to "did the cap cost you anything".
+    ///   For probes with no marker only the safe half of that holds — "not
+    ///   clipped" must mean the vectors agree — because a text with no
+    ///   in-vocabulary token has no way to show a clip in a vector either way.
+    #[test]
+    fn the_clipped_verdict_matches_what_the_cap_cost_the_vector() {
+        let model = bundled().expect("the bundled model loads");
+        for probe in probes() {
+            let reported = model.is_truncated(&probe.text);
+            assert_eq!(
+                reported,
+                probe.clipped,
+                "{}: {} chars, {} bytes",
+                probe.name,
+                probe.text.chars().count(),
+                probe.text.len()
+            );
+
+            let capped = model.embed(&probe.text).expect("embed");
+            let whole = embed_with_no_cap(model, &probe.text);
+            if probe.observable {
+                assert_eq!(
+                    reported,
+                    capped != whole,
+                    "{}: reported clipped = {reported}, but the cap {} the vector",
+                    probe.name,
+                    if capped == whole { "left" } else { "moved" }
+                );
+            } else if !reported {
+                assert_eq!(
+                    capped, whole,
+                    "{}: reported unclipped, yet the cap moved the vector",
+                    probe.name
+                );
+            }
+        }
+    }
+
+    /// The same property, on inputs nobody chose.
+    ///
+    /// The table above is a list of cases somebody thought of, and every round
+    /// of this card was lost to the case nobody thought of: a filler that could
+    /// not show truncation, a corpus with no byte above U+007F in any input, an
+    /// offset slice that only Hangul broke. Adding the case that was missed
+    /// buys the next one. This generates its inputs instead — 200 texts drawn
+    /// from a mixed alphabet of ASCII words, Hangul, in- and out-of-vocabulary
+    /// CJK, kana, accented Latin, runic, emoji, a URL, an identifier and runs
+    /// of whitespace, at lengths that straddle both cuts — and asserts the same
+    /// biconditional against the same upstream oracle.
+    ///
+    /// Every generated text ends with [`MARKER`], which none of the pieces
+    /// contain, so a clip of any size takes it and the mean moves: the
+    /// biconditional is exact for all 200 rather than one-directional. The
+    /// generator is a fixed-seed LCG, so a failure names a text that can be
+    /// regenerated rather than one that has already gone.
+    #[test]
+    fn a_generated_mixed_script_corpus_reports_clipped_exactly_when_the_cap_cost_it() {
+        let model = bundled().expect("the bundled model loads");
+        let mut clipped = 0usize;
+        let mut clipped_under_the_character_cut = 0usize;
+        let mut intact = 0usize;
+        for (index, text) in mixed_script_texts(200).into_iter().enumerate() {
+            let reported = model.is_truncated(&text);
+            let capped = model.embed(&text).expect("embed");
+            let whole = embed_with_no_cap(model, &text);
+            if reported {
+                clipped += 1;
+                // 6 is this vocabulary's median token length, so this counts
+                // the texts the token cut clipped on its own, with the
+                // character cut nowhere near them.
+                if text.chars().count() <= MAX_TOKENS * 6 {
+                    clipped_under_the_character_cut += 1;
+                }
+            } else {
+                intact += 1;
+            }
+
+            assert_eq!(
+                model.embed(&text).expect("embed"),
+                conform(model.inner.encode_single(&text), model.dim()).expect("conform"),
+                "text {index}: {} chars, {} bytes — embed is no longer upstream's call",
+                text.chars().count(),
+                text.len()
+            );
+            assert_eq!(
+                reported,
+                capped != whole,
+                "text {index}: {} chars, {} bytes, reported clipped = {reported}, cap {} the vector",
+                text.chars().count(),
+                text.len(),
+                if capped == whole { "left" } else { "moved" }
+            );
+        }
+
+        // What the corpus actually contains, asserted rather than assumed. A
+        // biconditional over 200 texts that all landed on one side of it would
+        // pass while checking half of what it says it checks, and a generator
+        // is one edit away from that at any time. The seed is fixed and every
+        // step from it is deterministic, so these are exact rather than floors:
+        // if a tokenizer bump moves them, the corpus this was validated against
+        // is not the corpus being run, and that is worth reddening for.
+        assert_eq!(
+            (clipped, intact, clipped_under_the_character_cut),
+            (132, 68, 22),
+            "the generated corpus no longer straddles the boundary it was built to straddle"
+        );
+    }
+
+    /// 200 mixed-script texts from a fixed seed, each ending in [`MARKER`].
+    fn mixed_script_texts(count: usize) -> Vec<String> {
+        // Deliberately uneven in characters per token and in bytes per
+        // character, because those two ratios are what decide which cut bites
+        // first and every earlier corpus held them fixed.
+        const PIECES: [&str; 17] = [
+            "steel ",
+            "ok ",
+            "a foundry casting valve bodies ",
+            "internationalization ",
+            "snake_case_identifier_name ",
+            "https://example.invalid/a/deeply/nested/path ",
+            "한 ",
+            "한국어 ",
+            "中 ",
+            "中",
+            "日本語 ",
+            "こんにちは ",
+            "工業製品 ",
+            "café ",
+            "\u{16A0} ",
+            "\u{1F701} ",
+            "     ",
+        ];
+        // Character budgets straddling the 3072-character cut and the lengths
+        // at which the token cut bites for each script.
+        const BUDGETS: [usize; 9] = [8, 300, 1200, 2900, 3050, 3071, 3080, 3400, 5200];
+
+        let mut state = 0x5EED_1234_9ABC_DEF0_u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+
+        let mut texts = Vec::with_capacity(count);
+        for index in 0..count {
+            let budget = BUDGETS[index % BUDGETS.len()] + next() % 64;
+            let mut text = String::new();
+            while text.chars().count() < budget {
+                text.push_str(PIECES[next() % PIECES.len()]);
+            }
+            text.push_str(MARKER);
+            texts.push(text);
+        }
+        texts
+    }
+
+    /// AC7: text that loses nothing is not reported clipped, however long it
+    /// runs.
+    ///
+    /// The character cut fires for any text over 3072 characters whether or not
+    /// a single id went with it, and a predicate that asked "did a cut fire"
+    /// answered yes for all four of these. `embed` of every one is the zero
+    /// vector, with the cap and without it.
     #[test]
     fn text_with_no_tokens_is_not_reported_clipped() {
         let model = bundled().expect("the bundled model loads");
-        for text in ["", "   ", "\u{16A0}\u{16A2}\u{16A6}"] {
-            assert!(!model.is_truncated(text), "{text:?}");
+        for text in [
+            String::new(),
+            "   ".to_string(),
+            "\u{16A0}\u{16A2}\u{16A6}".to_string(),
+            " ".repeat(5000),
+            "\u{16A0}".repeat(4000),
+            "工業製品 ".repeat(700),
+        ] {
+            assert!(
+                !model.is_truncated(&text),
+                "{} characters, {} bytes",
+                text.chars().count(),
+                text.len()
+            );
         }
     }
 
