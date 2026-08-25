@@ -230,6 +230,6 @@ community-check: extension configure release
 	$(PYTHON_BIN) scripts/check_artifact_version.py --compare $(EXTENSION) $(COMMUNITY_EXTENSION)
 	$(PYTHON_BIN) scripts/check_no_network_deps.py --artifact $(COMMUNITY_EXTENSION) --require-inspection
 	$(PYTHON_BIN) scripts/check_description_examples.py --self-test
-	$(PYTHON_BIN) scripts/check_description_examples.py --extension $(COMMUNITY_EXTENSION) --duckdb $(DUCKDB)
+	$(PYTHON_BIN) scripts/check_description_examples.py --extension $(COMMUNITY_EXTENSION) --duckdb $(DUCKDB) --require-complete
 
 endif

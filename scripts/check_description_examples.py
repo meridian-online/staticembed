@@ -37,6 +37,17 @@ function table against `duckdb_functions()` of the loaded artifact — derived
 from the build rather than from a list written here, so registering a sixth
 function reddens this until the page mentions it.
 
+It also holds the distribution workflow's inspection job to the platforms that
+workflow builds: an arch that survives the exclusions and opt-ins has to have an
+entry there, and that entry has to load the artifact or say what stops it.
+Reading a binary's trailer and its imports is not running it, and an artifact
+that builds, stamps and imports correctly can still refuse to `LOAD`.
+
+`--require-complete` turns an absent input from a named skip into a failure. The
+distribution matrix arrives through a submodule and `make check` is documented
+as working in a non-recursive clone, so CI passes the flag and the Makefile does
+not.
+
 Needs PyYAML. The registry's own `scripts/build.py` does too.
 
     scripts/check_description_examples.py --extension build/staticembed.duckdb_extension
@@ -60,6 +71,8 @@ DESCRIPTION = REPO_ROOT / "description.yml"
 MATRIX = REPO_ROOT / "extension-ci-tools" / "config" / "distribution_matrix.json"
 REHEARSAL = REPO_ROOT / ".github" / "workflows" / "MainDistributionPipeline.yml"
 BUILD_JOB = "duckdb-stable-build"
+#: The job that downloads every uploaded artifact and looks at it.
+INSPECTION_JOB = "no-network"
 
 MARKER = "STATICEMBED_EXAMPLE"
 
@@ -214,16 +227,119 @@ def repository_in_cargo_toml() -> str:
     return found.group(1)
 
 
-def known_platforms() -> set[str] | None:
-    """Every `duckdb_arch` the distribution matrix defines, or None if absent."""
+def matrix_entries() -> list[dict] | None:
+    """Every entry the distribution matrix defines, or None if it is absent."""
     if not MATRIX.is_file():
         return None
     matrix = json.loads(MATRIX.read_text())
+    return [entry for group in matrix.values() for entry in group.get("include", [])]
+
+
+def known_platforms() -> set[str] | None:
+    """Every `duckdb_arch` the distribution matrix defines, or None if absent."""
+    entries = matrix_entries()
+    return None if entries is None else {entry["duckdb_arch"] for entry in entries}
+
+
+def built_platforms(excluded: str, opted_in: str) -> set[str] | None:
+    """The platforms a given exclusion and opt-in list actually build and upload.
+
+    This mirrors `should_run` in extension-ci-tools'
+    `scripts/modify_distribution_matrix.py`: an arch is built when it is not
+    excluded, and is either not opt-in or named in the opt-in list.
+    `reduced_ci_mode` is left at the reusable workflow's default of `auto`,
+    which that script maps to off.
+    """
+    entries = matrix_entries()
+    if entries is None:
+        return None
+    excluded_set = set(filter(None, excluded.split(";")))
+    opted_in_set = set(filter(None, opted_in.split(";")))
     return {
         entry["duckdb_arch"]
-        for group in matrix.values()
-        for entry in group.get("include", [])
+        for entry in entries
+        if entry["duckdb_arch"] not in excluded_set
+        and (not entry.get("opt_in") or entry["duckdb_arch"] in opted_in_set)
     }
+
+
+def without_comments(text: str) -> str:
+    """YAML text with its comments removed, for asking whether a name is used.
+
+    A `#` opens a comment when it starts a line or follows whitespace, which is
+    YAML's own rule. This does not track quoting, so a `#` inside a quoted
+    string preceded by a space would truncate the line — that can only make a
+    used name look unused, which reddens loudly, never the other way round.
+    """
+    return "\n".join(re.sub(r"(^|\s)#.*$", "", line) for line in text.splitlines())
+
+
+def dead_env_problems(workflow: dict, text: str) -> list[str]:
+    """A workflow-level `env:` key that nothing in the file reads.
+
+    A declared variable no step and no expression uses still reads like a pin,
+    so the next person keeps it in step with something it does not control.
+    Comments are stripped first: a name that appears only in the comment
+    explaining it is not a use.
+    """
+    body = without_comments(text)
+    problems = []
+    for name in (workflow.get("env") or {}):
+        # One occurrence is the declaration itself.
+        if len(re.findall(rf"\b{re.escape(name)}\b", body)) <= 1:
+            problems.append(
+                f"{REHEARSAL.name} declares env.{name} and nothing outside its own comment "
+                f"reads it. A variable no step uses still reads as a pin — wire it in or "
+                f"delete it"
+            )
+    return problems
+
+
+def inspection_coverage_problems(workflow: dict, inputs: dict) -> list[str]:
+    """Every artifact this configuration uploads has to be looked at, and loaded or excused.
+
+    The platform list is derived from the distribution matrix and the build
+    job's own exclusions rather than read from a list written here, so opting a
+    platform in — or upstream adding one — cannot quietly produce an artifact
+    with no entry in the inspection job. Each entry either carries `load: true`,
+    meaning the job runs the binary, or `load_skipped_because:` naming what
+    stops it; a platform that is merely read and never run without saying so is
+    the gap this closes.
+    """
+    built = built_platforms(
+        str(inputs.get("exclude_archs", "")), str(inputs.get("opt_in_archs", ""))
+    )
+    if built is None:
+        # The matrix is absent. `descriptor_problems` reports that once, rather
+        # than every derived check reporting it again or going quiet.
+        return []
+
+    job = (workflow.get("jobs") or {}).get(INSPECTION_JOB) or {}
+    include = ((job.get("strategy") or {}).get("matrix") or {}).get("include") or []
+    by_arch = {str(entry.get("duckdb_arch")): entry for entry in include}
+
+    problems = []
+    for arch in sorted(built):
+        entry = by_arch.get(arch)
+        if entry is None:
+            problems.append(
+                f"{REHEARSAL.name} builds and uploads {arch}, but its `{INSPECTION_JOB}` job "
+                f"has no entry for it — that artifact would be published with nothing having "
+                f"looked at it"
+            )
+        elif entry.get("load") is not True and not str(entry.get("load_skipped_because", "")).strip():
+            problems.append(
+                f"{REHEARSAL.name}'s `{INSPECTION_JOB}` entry for {arch} neither loads the "
+                f"artifact nor says why not — give it `load: true`, or a "
+                f"`load_skipped_because:` naming what stops it"
+            )
+    for arch in sorted(by_arch):
+        if arch not in built:
+            problems.append(
+                f"{REHEARSAL.name}'s `{INSPECTION_JOB}` job has an entry for {arch}, which this "
+                f"configuration does not build — the download step would find no artifact"
+            )
+    return problems
 
 
 def rehearsal_problems(descriptor: dict, workflow: dict | None) -> list[str]:
@@ -234,10 +350,15 @@ def rehearsal_problems(descriptor: dict, workflow: dict | None) -> list[str]:
     with its own copy of both. Two copies that happen to agree today is what an
     acceptance criterion warned against, so this is where they are held
     together: a platform excluded in one and not the other means the run that
-    goes green is not the run the registry will do.
+    goes green is not the run the registry will do. The platforms that survive
+    those exclusions are then required to have an entry in the inspection job,
+    so an artifact cannot be uploaded with nothing having looked at it.
     """
     if workflow is None:
-        return []
+        return [
+            f"{REHEARSAL.name} is not in the tree, so the entry was compared with nothing. "
+            f"A rehearsal that cannot be read is not a rehearsal that agrees"
+        ]
     problems: list[str] = []
     extension = descriptor.get("extension") or {}
     job = ((workflow.get("jobs") or {}).get(BUILD_JOB) or {})
@@ -248,6 +369,7 @@ def rehearsal_problems(descriptor: dict, workflow: dict | None) -> list[str]:
     for entry_field, workflow_field in (
         ("name", "extension_name"),
         ("excluded_platforms", "exclude_archs"),
+        ("opt_in_platforms", "opt_in_archs"),
         ("requires_toolchains", "extra_toolchains"),
     ):
         entry_value = str(extension.get(entry_field, ""))
@@ -278,11 +400,24 @@ def rehearsal_problems(descriptor: dict, workflow: dict | None) -> list[str]:
             f"jobs download are built from the first and produced by the second"
         )
 
+    problems += inspection_coverage_problems(workflow, inputs)
+
     return problems
 
 
-def descriptor_problems(descriptor: dict, functions: list[str] | None) -> list[str]:
-    """Everything about the entry that disagrees with this tree."""
+def descriptor_problems(
+    descriptor: dict, functions: list[str] | None, require_complete: bool = False
+) -> list[str]:
+    """Everything about the entry that disagrees with this tree.
+
+    `require_complete` decides what an absent input means. The distribution
+    matrix arrives through the `extension-ci-tools` submodule, and `make check`
+    is documented as working in a clone made without `--recursive`, so its
+    absence is a named skip locally. In CI, where the checkout is recursive, it
+    is a failure — a check that reports clean because it could not look is the
+    shape this repository keeps deleting, and `--require-inspection` in
+    `check_no_network_deps.py` settles the same question the same way.
+    """
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from check_artifact_version import version_in_cargo_toml
 
@@ -313,7 +448,17 @@ def descriptor_problems(descriptor: dict, functions: list[str] | None) -> list[s
         )
 
     platforms = known_platforms()
-    if platforms is not None:
+    if platforms is None:
+        absent = (
+            f"{MATRIX.relative_to(REPO_ROOT)} is not in the tree, so the entry's platform names "
+            f"and the inspection job's coverage were not compared — run "
+            f"`git submodule update --init --recursive`"
+        )
+        if require_complete:
+            problems.append(absent)
+        else:
+            print(f"NOT CHECKED: {absent}", file=sys.stderr)
+    else:
         for field in ("excluded_platforms", "opt_in_platforms"):
             for name in filter(None, str(extension.get(field, "")).split(";")):
                 if name not in platforms:
@@ -322,9 +467,10 @@ def descriptor_problems(descriptor: dict, functions: list[str] | None) -> list[s
                         f"distribution matrix — a misspelt exclusion excludes nothing"
                     )
 
-    problems += rehearsal_problems(
-        descriptor, load_yaml(REHEARSAL) if REHEARSAL.is_file() else None
-    )
+    workflow = load_yaml(REHEARSAL) if REHEARSAL.is_file() else None
+    problems += rehearsal_problems(descriptor, workflow)
+    if workflow is not None:
+        problems += dead_env_problems(workflow, REHEARSAL.read_text())
 
     if functions is not None:
         docs = descriptor.get("docs") or {}
@@ -447,11 +593,27 @@ docs:
     # The rehearsal workflow against the entry. Each field is disagreed with in
     # turn, because a comparison nobody has seen report a difference is a
     # comparison of a value with itself.
+    # The exclusions the real entry declares, so `built_platforms` gives the
+    # five this repository ships and the inspection matrix below is realistic.
+    real_exclusions = "wasm_mvp;wasm_eh;wasm_threads;linux_amd64_musl;linux_arm64_musl;windows_amd64_mingw"
     entry = {
         "extension": {
             "name": "staticembed",
-            "excluded_platforms": "wasm_mvp;windows_amd64_mingw",
+            "excluded_platforms": real_exclusions,
             "requires_toolchains": "rust;python3",
+        }
+    }
+    inspection = {
+        "strategy": {
+            "matrix": {
+                "include": [
+                    {"duckdb_arch": "linux_amd64", "load": True},
+                    {"duckdb_arch": "linux_arm64", "load": True},
+                    {"duckdb_arch": "osx_amd64", "load": False, "load_skipped_because": "no Intel runner"},
+                    {"duckdb_arch": "osx_arm64", "load": True},
+                    {"duckdb_arch": "windows_amd64", "load": True},
+                ]
+            }
         }
     }
     agreeing = {
@@ -461,12 +623,13 @@ docs:
                 "uses": "duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata",
                 "with": {
                     "extension_name": "staticembed",
-                    "exclude_archs": "wasm_mvp;windows_amd64_mingw",
+                    "exclude_archs": real_exclusions,
                     "extra_toolchains": "rust;python3",
                     "ci_tools_version": "v1.5-variegata",
                     "duckdb_version": "v1.5.5",
                 },
-            }
+            },
+            "no-network": inspection,
         },
     }
     expect("an agreeing rehearsal reports nothing", rehearsal_problems(entry, agreeing) == [])
@@ -479,6 +642,7 @@ docs:
         ("extension_name", "staticembedd", "name"),
         ("ci_tools_version", "v1.5.5", "ci_tools_version"),
         ("duckdb_version", "v1.5.4", "DUCKDB_VERSION"),
+        ("opt_in_archs", "windows_arm64", "opt_in_platforms"),
     ):
         broken = copy.deepcopy(agreeing)
         broken["jobs"]["duckdb-stable-build"]["with"][field] = value
@@ -491,6 +655,103 @@ docs:
     expect(
         "a rehearsal with no build job is caught",
         any("no `duckdb-stable-build` job" in problem for problem in rehearsal_problems(entry, missing)),
+    )
+
+    # An absent workflow file. This returned [] until 2026-08-25, so moving the
+    # file aside left the whole comparison reporting "ok".
+    expect(
+        "a rehearsal that is not there at all is caught",
+        any("is not in the tree" in problem for problem in rehearsal_problems(entry, None)),
+    )
+
+    # Inspection coverage, checked only when the matrix is available because the
+    # platform list is derived from it rather than written here.
+    if matrix_entries() is not None:
+        expect(
+            "the real exclusions build the five platforms the inspection job lists",
+            built_platforms(real_exclusions, "")
+            == {"linux_amd64", "linux_arm64", "osx_amd64", "osx_arm64", "windows_amd64"},
+        )
+        expect(
+            "an opted-in platform joins the built set",
+            "windows_arm64" in (built_platforms(real_exclusions, "windows_arm64") or set()),
+        )
+
+        dropped = copy.deepcopy(agreeing)
+        dropped["jobs"]["no-network"]["strategy"]["matrix"]["include"] = [
+            item
+            for item in inspection["strategy"]["matrix"]["include"]
+            if item["duckdb_arch"] != "linux_arm64"
+        ]
+        expect(
+            "a built platform with no inspection entry is caught",
+            any("no entry for it" in problem for problem in rehearsal_problems(entry, dropped)),
+        )
+
+        silent = copy.deepcopy(agreeing)
+        for item in silent["jobs"]["no-network"]["strategy"]["matrix"]["include"]:
+            if item["duckdb_arch"] == "windows_amd64":
+                item["load"] = False
+        expect(
+            "an entry that stops loading without saying why is caught",
+            any("neither loads" in problem for problem in rehearsal_problems(entry, silent)),
+        )
+
+        excused = copy.deepcopy(agreeing)
+        for item in excused["jobs"]["no-network"]["strategy"]["matrix"]["include"]:
+            if item["duckdb_arch"] == "windows_amd64":
+                item["load"] = False
+                item["load_skipped_because"] = "a stated reason"
+        expect("and a stated reason is accepted", rehearsal_problems(entry, excused) == [])
+
+        opted = copy.deepcopy(agreeing)
+        opted["jobs"]["duckdb-stable-build"]["with"]["opt_in_archs"] = "windows_arm64"
+        opted_entry = {"extension": {**entry["extension"], "opt_in_platforms": "windows_arm64"}}
+        expect(
+            "opting a platform in without an inspection entry is caught",
+            any("windows_arm64" in problem for problem in rehearsal_problems(opted_entry, opted)),
+        )
+
+        surplus = copy.deepcopy(agreeing)
+        surplus["jobs"]["no-network"]["strategy"]["matrix"]["include"].append(
+            {"duckdb_arch": "wasm_mvp", "load": True}
+        )
+        expect(
+            "an inspection entry for a platform nothing builds is caught",
+            any("does not build" in problem for problem in rehearsal_problems(entry, surplus)),
+        )
+    else:
+        print("self-test: SKIPPED the inspection-coverage checks — extension-ci-tools is not checked out")
+
+    # A declared env variable nothing reads. env.CI_TOOLS_VERSION was exactly
+    # this: named in its own comment as a pin, and read by no step.
+    expect(
+        "an env variable used by a step is not reported",
+        dead_env_problems(
+            {"env": {"DUCKDB_VERSION": "v1.5.5"}},
+            "env:\n  DUCKDB_VERSION: v1.5.5\njobs:\n  x:\n    steps:\n"
+            "      - run: echo ${{ env.DUCKDB_VERSION }}\n",
+        )
+        == [],
+    )
+    expect(
+        "an env variable nothing reads is caught",
+        any(
+            "CI_TOOLS_VERSION" in problem
+            for problem in dead_env_problems(
+                {"env": {"CI_TOOLS_VERSION": "v1.5-variegata"}},
+                "env:\n  # Must equal the registry's CI_TOOLS_VERSION.\n"
+                "  CI_TOOLS_VERSION: v1.5-variegata\njobs: {}\n",
+            )
+        ),
+    )
+    expect(
+        "a comment is not a use",
+        "#" not in without_comments("  DUCKDB_VERSION: v1.5.5  # and a comment"),
+    )
+    expect(
+        "and stripping comments does not eat the declaration",
+        "DUCKDB_VERSION: v1.5.5" in without_comments("  DUCKDB_VERSION: v1.5.5  # a comment"),
     )
 
     # And the runner itself. No extension needed: this proves that a failing
@@ -521,8 +782,11 @@ docs:
 
     print(
         "self-test ok: the extractor finds a block scalar past lines that look like YAML keys, "
-        "takes sql fences and leaves python and text ones, and the runner fails on a missing "
-        "fixture and on a syntax error"
+        "takes sql fences and leaves python and text ones, the runner fails on a missing "
+        "fixture and on a syntax error, an absent rehearsal workflow is a failure rather than "
+        "a clean report, a built platform with no inspection entry and one that stops loading "
+        "without saying why are both caught, and a declared env variable nothing reads is "
+        "reported"
     )
     return 0
 
@@ -532,6 +796,11 @@ def main() -> int:
     parser.add_argument("--extension", type=pathlib.Path)
     parser.add_argument("--description", type=pathlib.Path, default=DESCRIPTION)
     parser.add_argument("--duckdb", default="duckdb")
+    parser.add_argument(
+        "--require-complete",
+        action="store_true",
+        help="fail rather than skip when an input this check reads is absent",
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -552,16 +821,28 @@ def main() -> int:
     failures = 0
 
     functions = registered_functions(args.duckdb, args.extension)
-    problems = descriptor_problems(descriptor, functions)
+    problems = descriptor_problems(descriptor, functions, require_complete=args.require_complete)
     if problems:
         print(f"FAIL: {args.description} does not describe this tree:", file=sys.stderr)
         for problem in problems:
             print(f"       {problem}", file=sys.stderr)
         failures += 1
     else:
+        built = built_platforms(
+            str((descriptor.get("extension") or {}).get("excluded_platforms", "")),
+            str((descriptor.get("extension") or {}).get("opt_in_platforms", "")),
+        )
+        # The sentence names what was compared. When the matrix is absent the
+        # platform names were not read at all, and saying they agree would be
+        # the same defect this check exists to catch.
+        coverage = (
+            f"the {len(built)} platforms it builds carry matrix names and are each inspected"
+            if built is not None
+            else "NOTHING about platform names or inspection coverage — see the NOT CHECKED line"
+        )
         print(
-            f"ok: the entry's version, repository, ref shape and platform names agree with the "
-            f"tree, and it names all {len(functions)} functions the artifact registers"
+            f"ok: the entry's version, repository and ref shape agree with the tree, it names "
+            f"all {len(functions)} functions the artifact registers, and {coverage}"
         )
 
     blocks = examples(descriptor)

@@ -110,10 +110,15 @@ jobs:
       - name: Install PyYAML
         run: python3 -m pip install pyyaml
 
+      # --require-complete because this checkout IS recursive: here the
+      # distribution matrix being absent means the submodule step broke, not
+      # that someone cloned without it, and the platform-name and
+      # inspection-coverage checks would otherwise report clean for having
+      # nothing to read.
       - name: The registry entry's examples run, and it describes this tree
         run: |
           python3 scripts/check_description_examples.py --self-test
-          python3 scripts/check_description_examples.py --extension build/staticembed.duckdb_extension
+          python3 scripts/check_description_examples.py --extension build/staticembed.duckdb_extension --require-complete
 
       # Anchors only: this validates that every mutation in the table still
       # names a line that exists and applies none of them, which is seconds. The
