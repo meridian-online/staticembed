@@ -44,6 +44,11 @@ GLUE = "crates/staticembed-duckdb/src/lib.rs"
 #: mutation, so the next reader has to build one rather than find one.
 ARTIFACT = "build/staticembed.duckdb_extension"
 
+#: The doc checks below need no build and no duckdb: they read two files in the
+#: tree. Named here so a mutation of one cannot quietly point at the other.
+QUALITY_CLAIMS = ["python3", "scripts/check_quality_claims.py"]
+QUALITY_CLAIMS_SELF_TEST = [*QUALITY_CLAIMS, "--self-test"]
+
 
 @dataclass
 class Mutation:
@@ -577,6 +582,69 @@ MUTATIONS: list[Mutation] = [
         new="        signatures.append(sorted(field.split()[0] for field in fields))",
         kind="script",
         command=["python3", "scripts/check_documented_surface.py", "--self-test"],
+    ),
+    # ── the published quality position ───────────────────────────────────────
+    # README.md and description.yml both tell a stranger how good these vectors
+    # are, and description.yml is the copy that becomes the registry page.
+    # Neither can be settled by loading the extension, so the mutations below
+    # break the pages and the checker in turn. None of them touches Rust, so
+    # none rebuilds the cdylib.
+    Mutation(
+        name="the_readme_hedges_the_neighbourhood_figure",
+        file="README.md",
+        old="13% are the same rows on long-form prose",
+        new="only a minority are the same rows on long-form prose",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_registry_entry_drops_the_shape_dependence",
+        file="description.yml",
+        old="worst on long prose and mildest on",
+        new="noticeable across the board and on",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_registry_entry_and_the_readme_disagree_on_a_figure",
+        file="description.yml",
+        old="| region structure kept | 71% | 67% | 88% |",
+        new="| region structure kept | 71% | 67% | 95% |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_published_figures_drift_from_the_measurement",
+        file="scripts/check_quality_claims.py",
+        old='Figure(0.13185, "kNN overlap with MiniLM\'s map, long-form prose", FINETYPE_EVAL),',
+        new='Figure(0.20185, "kNN overlap with MiniLM\'s map, long-form prose", FINETYPE_EVAL),',
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # And the checker going blind, measured through its own self-test.
+    Mutation(
+        name="the_quality_check_stops_comparing_the_two_pages",
+        file="scripts/check_quality_claims.py",
+        old="    for value in sorted(in_readme - in_descriptor):",
+        new="    for value in sorted(set()):",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_rounding_at_the_written_precision",
+        file="scripts/check_quality_claims.py",
+        old="    tolerance = 0.5 * 10.0**-places",
+        new="    tolerance = 0.5",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_pinning_a_figure_to_its_corpus",
+        file="scripts/check_quality_claims.py",
+        old="    for claim in CLAIMS:",
+        new="    for claim in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
     ),
     # ── the engine's public behaviour ────────────────────────────────────────
     # Not "the first lookup is skipped": that is a fast path, and `recheck`

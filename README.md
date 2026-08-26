@@ -18,15 +18,36 @@ Every other route to an embedding inside DuckDB is either a transformer forward 
 
 Being a scalar is the point. It composes with `WHERE` and `LIMIT`, so you can embed a filtered subset rather than a whole table, and it behaves the same over a local Parquet file as over a remote one.
 
-## What it is not
+## What it is good at, and what it is not
 
-**It is not a drop-in replacement for a hosted transformer, and the difference is measured rather than hedged.** A static embedding has no contextual attention. On the evidence we have, a two-dimensional map built from these vectors recovers most of the cluster structure a hosted transformer recovers — the regions of the map mean something. What it does not preserve is which specific rows sit next to which: only a minority of any point's nearest neighbours survive the swap.
+**It is not a drop-in replacement for a hosted transformer, and the difference is measured rather than hedged.** A static embedding is the mean of its token vectors with no contextual attention, and what that costs is specific rather than general. Every figure below compares the bundled `potion-base-8M` against `all-MiniLM-L6-v2`. Ours come from the harness, corpora and committed results in `eval/static-embedding-map-fidelity/` in [meridian-online/finetype](https://github.com/meridian-online/finetype); the figures that are not ours say whose they are.
 
-It also does not read word order. A Model2Vec vector is the mean of its token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same vector. Repetition does count — a word twice pulls the mean toward it — but any phrase and its shuffle land in the same place.
+**Two different questions live under "similarity", and only one of them is weak here.** *Pairwise judgement* asks how alike two given strings are — is A a duplicate of B. *Ranked retrieval* asks a whole corpus for the rows most like A. Everything below that reads as a weakness is in the second, and this page used to read as though it were in both.
 
-So this is built for looking at the shape of a corpus, and it is not built for "show me the rows most like this one". If nearest-neighbour lookup is what you need, this is the wrong tool, and we would rather say so here than have you find out from your results.
+### What it is good at
 
-Figures, corpora and method are published with the measurement in [meridian-online/finetype](https://github.com/meridian-online/finetype).
+**Pairwise similarity and duplicate scoring.** [SwiftEmbed](https://arxiv.org/abs/2510.24793), built on this same `potion-base-8M`, reports 90.1% average precision on SprintDuplicateQuestions where Sentence-BERT reports 84.7% — ahead of it, not merely close — and 89% to 100% of Sentence-BERT across its similarity and deduplication tasks. Those are their published figures rather than our measurement.
+
+**Coarse classification and tagging.** The same work puts classification at about 75% of Sentence-BERT. On the shortest text we measured ourselves that gap closes and reverses: over 216 column names in 12 semantic classes, clustering the raw static vectors recovers more of the label structure than clustering MiniLM's — 0.3924 against 0.3510 by adjusted mutual information, which is how much knowing the clusters tells you about the labels. Read that one as indicative rather than settled, because 216 rows is a small sample; it is also the shape of text a database column usually holds.
+
+**Reading a corpus as regions.** Project these vectors down to two dimensions and the groups you see still line up with the corpus's own labels: 71% of what MiniLM's map recovers on long-form prose, 67% on short text, 88% on very short strings. That is measured against a random-vector control rather than against nothing, so it is a share of the structure a real embedder finds and a fake one does not.
+
+### What it is not for
+
+**Ranked nearest-neighbour lookup — "show me the rows most like this one".** Take a point's 20 nearest neighbours in a map built from these vectors, and the same point's in a map built from MiniLM's: 13% are the same rows on long-form prose, 28% on short text, 40% on very short strings. The regions agree and the neighbourhoods do not. There is deliberately no similarity or nearest-neighbour function in this extension, and this is the reason.
+
+**And the penalty depends on the shape of your text, in the opposite direction to the usual guess.** It is worst on long prose and mildest on short strings — 13% against 40% on neighbours, 71% against 88% on regions. The more context a text carries, the more is lost by not attending to it. So a column of names, titles, codes or one-line descriptions is at the good end, and a column of paragraphs is at the bad end.
+
+| | long-form prose | short text | very short strings |
+|---|---|---|---|
+| corpus | 20 Newsgroups posts | their subject lines | column names |
+| rows | 3,000 | 3,000 | 216 |
+| nearest neighbours that survive | 13% | 28% | 40% |
+| region structure kept | 71% | 67% | 88% |
+
+**It also does not read word order.** A Model2Vec vector is the mean of its token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same vector. Repetition does count — a word twice pulls the mean toward it — but any phrase and its shuffle land in the same place.
+
+Every figure here was measured on the bundled model at the revision pinned in [`models/potion-base-8M/SOURCE.md`](models/potion-base-8M/SOURCE.md), and vectors from two model versions are not comparable. `scripts/check_quality_claims.py` reddens if that revision moves without the measurement being redone, and holds this section and `description.yml`'s copy of it to the same figures.
 
 ## The SQL surface
 
@@ -40,7 +61,7 @@ Five functions, and `embed` is the one you came for.
 | `staticembed_cache_stats()` | `STRUCT(hits, misses, encoded, uncached, entries, capacity)` | what the cache has been doing |
 | `staticembed_cache_clear()` | `BIGINT` | drop the cached vectors; returns how many |
 
-There is no similarity or nearest-neighbour function, deliberately. See *What it is not* above.
+There is no similarity or nearest-neighbour function, deliberately. See *What it is good at, and what it is not* above.
 
 ### NULL, and text with nothing in it
 

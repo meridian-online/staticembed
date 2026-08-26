@@ -31,12 +31,12 @@ DUCKDB_PLATFORM ?= $(if $(CLI_PLATFORM),$(CLI_PLATFORM),$(UNAME_PLATFORM))
 BUILD_DIR := build
 EXTENSION := $(BUILD_DIR)/$(EXTENSION_NAME).duckdb_extension
 
-.PHONY: all check build extension test test-sql description-examples no-network documented-surface mutation-check fmt clippy clean
+.PHONY: all check build extension test test-sql description-examples no-network documented-surface quality-claims mutation-check fmt clippy clean
 
 all: extension
 
 ## Everything CI runs, in the order it runs it.
-check: fmt clippy test extension no-network documented-surface test-sql description-examples
+check: fmt clippy test extension no-network documented-surface test-sql description-examples quality-claims
 
 build:
 	cargo build --workspace --release
@@ -85,6 +85,16 @@ test-sql: extension
 description-examples: extension
 	python3 scripts/check_description_examples.py --self-test
 	python3 scripts/check_description_examples.py --extension $(EXTENSION) --duckdb $(DUCKDB)
+
+## The quality position published in README.md and in description.yml's
+## extended_description, against each other and against the measurement that
+## produced it. A function signature can be settled by loading the extension;
+## a quality claim cannot, so this holds the two copies to one set of figures
+## and reddens when the bundled model moves out from under them. Needs PyYAML
+## for the same reason `description-examples` does. No build, no duckdb.
+quality-claims:
+	python3 scripts/check_quality_claims.py --self-test
+	python3 scripts/check_quality_claims.py
 
 ## Break the code on purpose and require the named test to redden. NOT part of
 ## `check`: every SQL mutation rebuilds the release cdylib, so a sweep is

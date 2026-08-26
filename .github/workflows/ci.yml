@@ -121,6 +121,17 @@ jobs:
           python3 scripts/check_description_examples.py --self-test
           python3 scripts/check_description_examples.py --extension build/staticembed.duckdb_extension --require-complete
 
+      # The quality position, in the two files that publish it. Every figure a
+      # stranger reads before installing has to be one somebody measured, the
+      # registry page and README have to carry the same set, and a model bump
+      # reddens rather than leaving them describing weights that are no longer
+      # in the binary. The self-test runs first, for the same reason it does
+      # above.
+      - name: The two published pages agree about quality, and with the measurement
+        run: |
+          python3 scripts/check_quality_claims.py --self-test
+          python3 scripts/check_quality_claims.py
+
       # Anchors only: this validates that every mutation in the table still
       # names a line that exists and applies none of them, which is seconds. The
       # sweep itself rebuilds the release cdylib per mutation and stays local.
