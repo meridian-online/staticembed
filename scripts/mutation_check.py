@@ -600,8 +600,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="the_registry_entry_drops_the_shape_dependence",
         file="description.yml",
-        old="worst on long prose and mildest on",
-        new="noticeable across the board and on",
+        old="It is worst on long prose and\n    mildest on very short strings",
+        new="It is noticeable across the board and\n    much the same whatever the corpus",
         kind="script",
         command=QUALITY_CLAIMS,
     ),
@@ -616,8 +616,8 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="the_published_figures_drift_from_the_measurement",
         file="scripts/check_quality_claims.py",
-        old='Figure(0.13185, "kNN overlap with MiniLM\'s map, long-form prose", FINETYPE_EVAL),',
-        new='Figure(0.20185, "kNN overlap with MiniLM\'s map, long-form prose", FINETYPE_EVAL),',
+        old='        0.13185,\n        "kNN overlap with MiniLM\'s map, long-form prose",',
+        new='        0.20185,\n        "kNN overlap with MiniLM\'s map, long-form prose",',
         kind="script",
         command=QUALITY_CLAIMS,
     ),
@@ -625,16 +625,16 @@ MUTATIONS: list[Mutation] = [
     Mutation(
         name="the_quality_check_stops_comparing_the_two_pages",
         file="scripts/check_quality_claims.py",
-        old="    for value in sorted(in_readme - in_descriptor):",
-        new="    for value in sorted(set()):",
+        old="    for value in sorted((readme_counts - descriptor_counts).elements()):",
+        new="    for value in sorted([]):",
         kind="script",
         command=QUALITY_CLAIMS_SELF_TEST,
     ),
     Mutation(
         name="the_quality_check_stops_rounding_at_the_written_precision",
         file="scripts/check_quality_claims.py",
-        old="    tolerance = 0.5 * 10.0**-places",
-        new="    tolerance = 0.5",
+        old="    return abs(figure.value - value) <= 0.5 * 10.0**-places + 1e-12",
+        new="    return abs(figure.value - value) <= 0.5",
         kind="script",
         command=QUALITY_CLAIMS_SELF_TEST,
     ),
@@ -643,6 +643,110 @@ MUTATIONS: list[Mutation] = [
         file="scripts/check_quality_claims.py",
         old="    for claim in CLAIMS:",
         new="    for claim in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The summary table restates the prose figures, and a literal string pin
+    # cannot tie a cell to the corpus it sits under: two cells swapped leave the
+    # set of quantities on the page unchanged. It is read cell by cell against
+    # FIGURES, by the row's series and the column's corpus, and these are the
+    # two edits that used to be invisible.
+    Mutation(
+        name="the_readme_swaps_two_summary_table_cells",
+        file="README.md",
+        old="| nearest neighbours that survive | 13% | 28% | 40% |",
+        new="| nearest neighbours that survive | 28% | 13% | 40% |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_readme_reverses_the_summary_table_header",
+        file="README.md",
+        old="| | long-form prose | short text | very short strings |",
+        new="| | very short strings | short text | long-form prose |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # Region structure is 71%, 67%, 88% — not a gradient. A sentence quoting
+    # only its endpoints told a reader with one-line descriptions they were at
+    # the good end while the cited metric put them at the worst.
+    Mutation(
+        name="the_readme_states_a_direction_from_the_endpoints_only",
+        file="README.md",
+        old="mildest on very short strings — 13%, then 28%, then 40% as the text gets shorter.",
+        new="mildest on short strings — 13% against 40% on neighbours, 71% against 88% on regions.",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # A blanket universal over a section that deliberately mixes our measurement
+    # with a third party's, which cancels the per-item sourcing around it.
+    Mutation(
+        name="the_readme_asserts_a_universal_over_the_mixed_sourcing",
+        file="README.md",
+        old="and where they compare, the comparison is the bundled",
+        new="and every figure below compares the bundled",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # Speed is ruled out of the published claim. A section-scoped ban let it in
+    # three headings down, where it reaches the same reader.
+    Mutation(
+        name="a_speed_figure_lands_under_the_sql_surface",
+        file="README.md",
+        old="There is no similarity or nearest-neighbour function, deliberately.",
+        new=(
+            "There is no similarity or nearest-neighbour function, deliberately. "
+            "It embeds 50,000 rows per second."
+        ),
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # And the new assertions going blind, measured through the self-test.
+    Mutation(
+        name="the_quality_check_stops_reading_the_summary_table",
+        file="scripts/check_quality_claims.py",
+        old="    for label, series in TABLE_ROWS.items():",
+        new="    for label, series in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_requiring_a_whole_series",
+        file="scripts/check_quality_claims.py",
+        old="            if not written or len(written) == len(members):",
+        new="            if True:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_scanning_for_universals",
+        file="scripts/check_quality_claims.py",
+        old="    for match in UNIVERSAL.finditer(collapsed):",
+        new="    for match in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_expiring_a_permitted_universal",
+        file="scripts/check_quality_claims.py",
+        old="        if collapse(allowance.phrase) not in haystack:",
+        new="        if False:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_comparing_the_order_of_the_figures",
+        file="scripts/check_quality_claims.py",
+        old="    for index, (left, right) in enumerate(zip(in_readme, in_descriptor)):",
+        new="    for index, (left, right) in enumerate([]):",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_banning_speed_outside_the_section",
+        file="scripts/check_quality_claims.py",
+        old="    for phrase, reason in BANNED_ON_PAGE:",
+        new="    for phrase, reason in []:",
         kind="script",
         command=QUALITY_CLAIMS_SELF_TEST,
     ),

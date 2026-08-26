@@ -20,9 +20,9 @@ Being a scalar is the point. It composes with `WHERE` and `LIMIT`, so you can em
 
 ## What it is good at, and what it is not
 
-**It is not a drop-in replacement for a hosted transformer, and the difference is measured rather than hedged.** A static embedding is the mean of its token vectors with no contextual attention, and what that costs is specific rather than general. Every figure below compares the bundled `potion-base-8M` against `all-MiniLM-L6-v2`. Ours come from the harness, corpora and committed results in `eval/static-embedding-map-fidelity/` in [meridian-online/finetype](https://github.com/meridian-online/finetype); the figures that are not ours say whose they are.
+**It is not a drop-in replacement for a hosted transformer, and the difference is measured rather than hedged.** A static embedding is the mean of its token vectors with no contextual attention, and what that costs is specific rather than general. Our own figures come from the harness, corpora and committed results in `eval/static-embedding-map-fidelity/` in [meridian-online/finetype](https://github.com/meridian-online/finetype), and where they compare, the comparison is the bundled `potion-base-8M` against `all-MiniLM-L6-v2`. The figures that are not ours name whose they are, and what they were measured against, in the sentence that carries them — a different model, on a different benchmark.
 
-**Two different questions live under "similarity", and only one of them is weak here.** *Pairwise judgement* asks how alike two given strings are — is A a duplicate of B. *Ranked retrieval* asks a whole corpus for the rows most like A. Everything below that reads as a weakness is in the second, and this page used to read as though it were in both.
+**Two different questions live under "similarity", and this embedder answers them differently.** *Pairwise judgement* asks how alike two given strings are — is A a duplicate of B. *Ranked retrieval* asks a whole corpus for the rows most like A. The neighbourhood figures under *What it is not for* are ranked retrieval, and they are the weak result on this page; the duplicate-detection figures under *What it is good at* are pairwise, and they point the other way. Word-order blindness is a failure of both — a phrase and its shuffle are false neighbours *and* a false duplicate.
 
 ### What it is good at
 
@@ -36,7 +36,9 @@ Being a scalar is the point. It composes with `WHERE` and `LIMIT`, so you can em
 
 **Ranked nearest-neighbour lookup — "show me the rows most like this one".** Take a point's 20 nearest neighbours in a map built from these vectors, and the same point's in a map built from MiniLM's: 13% are the same rows on long-form prose, 28% on short text, 40% on very short strings. The regions agree and the neighbourhoods do not. There is deliberately no similarity or nearest-neighbour function in this extension, and this is the reason.
 
-**And the penalty depends on the shape of your text, in the opposite direction to the usual guess.** It is worst on long prose and mildest on short strings — 13% against 40% on neighbours, 71% against 88% on regions. The more context a text carries, the more is lost by not attending to it. So a column of names, titles, codes or one-line descriptions is at the good end, and a column of paragraphs is at the bad end.
+**And the neighbourhood penalty depends on the shape of your text, in the opposite direction to the usual guess.** It is worst on long prose and mildest on very short strings — 13%, then 28%, then 40% as the text gets shorter. The more context a text carries, the more is lost by not attending to it. So a column of names, codes or identifiers is at the good end for neighbourhoods, and a column of paragraphs is at the bad end.
+
+**Region structure does not run down the same line, and a one-line description is the case to watch.** 71% on long-form prose, 67% on short text, 88% on very short strings — short text is the weakest of the three for regions, not the middle of them. A column of titles, subject lines or one-line descriptions is therefore in the better half for neighbourhoods and at the bottom for regions, so read the two rows of the table below as two separate measurements rather than as one gradient.
 
 | | long-form prose | short text | very short strings |
 |---|---|---|---|
@@ -45,9 +47,9 @@ Being a scalar is the point. It composes with `WHERE` and `LIMIT`, so you can em
 | nearest neighbours that survive | 13% | 28% | 40% |
 | region structure kept | 71% | 67% | 88% |
 
-**It also does not read word order.** A Model2Vec vector is the mean of its token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same vector. Repetition does count — a word twice pulls the mean toward it — but any phrase and its shuffle land in the same place.
+**It also does not read word order.** A Model2Vec vector is the mean of its token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same vector — a false duplicate, which is a pairwise failure and not a ranked-retrieval one. Repetition does count — a word twice pulls the mean toward it — but any phrase and its shuffle land in the same place.
 
-Every figure here was measured on the bundled model at the revision pinned in [`models/potion-base-8M/SOURCE.md`](models/potion-base-8M/SOURCE.md), and vectors from two model versions are not comparable. `scripts/check_quality_claims.py` reddens if that revision moves without the measurement being redone, and holds this section and `description.yml`'s copy of it to the same figures.
+Our figures were measured with the harness in `eval/static-embedding-map-fidelity/` against `potion-base-8M` as Hugging Face served it at the time; that harness downloads the model by name and records no revision, so the tie between these figures and the weights in this binary is asserted here rather than recorded there. What is enforced is narrower, and worth having: vectors from two model versions are not comparable, so `scripts/check_quality_claims.py` reddens when the bundled revision moves off the one in [`models/potion-base-8M/SOURCE.md`](models/potion-base-8M/SOURCE.md) that these figures were published against, which forces a re-run or a deliberate re-blessing instead of a quiet drift. It holds this section and `description.yml`'s copy of it to the same figures at the same time.
 
 ## The SQL surface
 

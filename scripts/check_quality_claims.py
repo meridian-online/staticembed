@@ -10,7 +10,7 @@ which is why `check_documented_surface.py` exists.
 
 A quality claim cannot be settled by loading the extension the way a function
 signature can. What it can be settled against is the measurement that produced
-it, so this holds three things at once:
+it, and against the other copy of itself.
 
 WHAT IS ASSERTED
     1. Both files carry a section headed `SECTION_HEADING`, and neither is
@@ -21,33 +21,92 @@ WHAT IS ASSERTED
        from. An unregistered quantity is a claim with nothing behind it, so the
        set is closed: a new figure reddens until it is entered here with its
        source.
-    3. The two sections carry the same set of quantities. A figure in one and
-       not the other is the defect this check is named for.
-    4. Every string in `CLAIMS` appears in both sections. Assertion 3 compares
-       quantities as a set, so on its own it cannot see two figures swapped
-       between corpora; these pin each figure to the thing it is a figure of.
-    5. No phrase in `BANNED` appears in either section — the hedges the figures
-       replaced, and any vocabulary of speed. Speed was ruled out of the quality
-       claim on purpose: the embedding-only number is an order of magnitude
-       larger than the end-to-end one and would flatter the page.
-    6. The revision of the bundled model is the revision the figures were
-       measured on. Vectors from two model versions are not comparable, so a
-       model bump does not make these figures stale quietly — it reddens here
-       until the harness is re-run.
-    7. Every entry in `FIGURES` is written on at least one of the two pages. A
-       table of permitted values that outlives the sentence it permitted widens
-       assertion 2 without anyone deciding to, which is the same shape as a
-       mutation anchor naming a line that has been deleted.
+    3. The two sections write the same quantities, the same number of times, in
+       the same order. Order matters because a figure moved to another row or
+       another corpus leaves the set of quantities untouched: a summary-table
+       cell swapped in one file and not the other used to pass a set comparison
+       in both directions.
+    4. Every string in `CLAIMS` appears in both sections. These pin the wording
+       a figure is embedded in, so a rewrite that drops the corpus a figure
+       belongs to reddens.
+    5. The summary table's columns run `CORPORA` in that order, and every cell
+       of a `TABLE_ROWS` row is the figure `FIGURES` registers for that row's
+       series and that column's corpus. This is the assertion that survives a
+       maintainer editing page and pin together: `13%` under `short text`
+       reddens against a registered 0.27758 however the prose is worded.
+    6. No sentence writes part of a series in `DIRECTIONAL_SERIES` without
+       writing all of it. Both series run over the same three corpora and one of
+       them is not monotone — region structure is 71%, 67%, 88%, so short text
+       is the worst of the three and not the middle. A sentence quoting the two
+       endpoints reads as a gradient and is not one, and this is what stops the
+       page claiming a direction the reader cannot check from the same sentence.
+    7. No universal quantifier appears in either section unless it is recorded
+       in `ALLOWED_UNIVERSALS` with why it holds. See the block below for what
+       this covers and what it cannot see; it is the widest of these assertions
+       and the one with the largest blind spot.
+    8. No phrase in `BANNED_IN_SECTION` appears in either section — the hedges
+       the figures replaced. And no phrase in `BANNED_ON_PAGE` appears anywhere
+       on either page: speed was ruled out of the product claim on purpose,
+       because the embedding-only number is an order of magnitude larger than
+       the end-to-end one, and a speed figure planted under *The SQL surface*
+       flatters the product to the same reader as one planted here. That ban is
+       page-wide for that reason, not section-wide.
+    9. The bundled model has not moved off `MEASURED_ON_REVISION`.
+   10. Every entry in `FIGURES` and every entry in `ALLOWED_UNIVERSALS` is
+       written on at least one of the two pages. A permitted value or a
+       permitted universal that outlives the sentence it permitted widens
+       assertions 2 and 7 without anyone deciding to, which is the same shape as
+       a mutation anchor naming a line that has been deleted.
+
+WHAT THE UNIVERSAL-QUANTIFIER SCAN COVERS, AND WHAT IT CANNOT SEE
+    It covers exactly the words in `UNIVERSAL_WORDS`, matched whole, inside the
+    two quality sections, after code spans and links are removed. It exists
+    because both published defects it was written for were the same shape: a
+    blanket sentence asserting a uniform property over a list whose items do not
+    share it. "Every figure below compares potion-base-8M against MiniLM" stood
+    over a section that deliberately mixes our measurement with a third party's,
+    and cancelled the per-item sourcing the rest of the section does carefully.
+    Pinning sentences in `CLAIMS` could not have found it, because `CLAIMS` pins
+    what somebody thought to enumerate.
+
+    It cannot see a universal written without one of those words. A bare plural
+    generic — "the figures below compare X against Y" — asserts precisely the
+    same thing as "every figure below compares X against Y" and carries no
+    quantifier at all. That is the largest hole and it is not closeable by
+    widening the word list; this scan is a floor, not a proof.
+
+    It cannot see `invariably`, `in each case`, `without exception`, `bar none`,
+    or any other spelling not in `UNIVERSAL_WORDS`. Adding one is a one-line
+    change and should be made when one is met, rather than assumed absent.
+
+    It does not judge truth. An entry in `ALLOWED_UNIVERSALS` is a person's
+    recorded reason, not a derivation, and nothing here re-checks it. What it
+    does guarantee is that the reason exists, in this file, next to the phrase
+    it permits, where a reviewer reads it — and that it disappears when the
+    sentence does, by assertion 10.
+
+    It is scoped to the two quality sections and not to the whole page. The rest
+    of `README.md` is full of true universals about a deterministic function
+    ("`embed(NULL)` is always NULL"), and a scan that cried wolf there would be
+    turned off. The speed ban in assertion 8 is the one that runs page-wide,
+    because that is where its defect was planted.
 
 WHAT IS NOT ASSERTED
     That the figures are true. `FIGURES` is a transcription of a measurement
     made elsewhere, named in each entry's `source`; nothing here re-runs it.
-    Assertion 6 is what stops the transcription outliving the model it
-    describes.
+
+    That the figures were measured on the bundled revision. The harness in
+    finetype downloads `potion-base-8M` by name and records no revision, and
+    `results.json` carries none, so `MEASURED_ON_REVISION` is a tripwire and not
+    a proof: it is the revision `SOURCE.md` recorded when these figures were
+    published. Assertion 9 forces a model bump to be noticed and the measurement
+    re-run or deliberately re-blessed. It cannot certify what the harness ran
+    against, and the page does not claim it can.
 
     A quality claim carrying no quantity at all. "Roughly as good as a
     transformer" in one file and not the other passes every assertion above.
-    `BANNED` catches the specific hedges this page used to carry and no others.
+    `BANNED_IN_SECTION` catches the specific hedges this page used to carry and
+    no others.
 
 Needs PyYAML, because `extended_description` is a block scalar inside a YAML
 document and a regex cannot tell one from the prose around it.
@@ -62,6 +121,7 @@ import argparse
 import pathlib
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -74,12 +134,17 @@ MODEL_SOURCE = "models/potion-base-8M/SOURCE.md"
 #: files, spelled identically. Renaming it in one file is caught by assertion 1.
 SECTION_HEADING = "What it is good at, and what it is not"
 
-#: The bundled model revision the measurement in `FIGURES` was taken on, as
-#: `models/potion-base-8M/SOURCE.md` records it. Assertion 6.
+#: The revision `models/potion-base-8M/SOURCE.md` recorded when the figures in
+#: `FIGURES` were published. A tripwire, not a proof — see WHAT IS NOT ASSERTED.
 MEASURED_ON_REVISION = "bf8b056651a2c21b8d2565580b8569da283cab23"
 
 FINETYPE_EVAL = "finetype eval/static-embedding-map-fidelity/results.json"
 SWIFTEMBED = "SwiftEmbed, arxiv.org/abs/2510.24793"
+
+#: The three corpora, in the order the summary table's columns run and in the
+#: order the prose lists them. Assertion 5 reads the table against this, so a
+#: reversed header row is a mismatch rather than an invisible edit.
+CORPORA = ("long-form prose", "short text", "very short strings")
 
 
 @dataclass(frozen=True)
@@ -89,6 +154,13 @@ class Figure:
     value: float
     what: str
     source: str
+    #: The named run of figures over `CORPORA` this belongs to, if any. Used by
+    #: assertion 5 to read a summary-table cell and by assertion 6 to require a
+    #: whole series in one sentence.
+    series: str = ""
+    #: Which of `CORPORA` this figure is for. Empty when the figure is not one
+    #: of a per-corpus series.
+    corpus: str = ""
 
 
 #: Every quantity either section may contain. Closed on purpose: a figure that
@@ -97,19 +169,78 @@ class Figure:
 FIGURES: list[Figure] = [
     # Ours. potion-base-8M against all-MiniLM-L6-v2, seed 42, 20 nearest
     # neighbours, UMAP(metric="cosine", n_neighbors=15, random_state=42).
-    Figure(0.13185, "kNN overlap with MiniLM's map, long-form prose", FINETYPE_EVAL),
-    Figure(0.27758, "kNN overlap with MiniLM's map, short text", FINETYPE_EVAL),
-    Figure(0.40301, "kNN overlap with MiniLM's map, very short strings", FINETYPE_EVAL),
-    Figure(0.71005, "cluster-structure retention vs MiniLM, long-form prose", FINETYPE_EVAL),
-    Figure(0.66735, "cluster-structure retention vs MiniLM, short text", FINETYPE_EVAL),
-    Figure(0.87503, "cluster-structure retention vs MiniLM, very short strings", FINETYPE_EVAL),
+    Figure(
+        0.13185,
+        "kNN overlap with MiniLM's map, long-form prose",
+        FINETYPE_EVAL,
+        series="kNN overlap",
+        corpus="long-form prose",
+    ),
+    Figure(
+        0.27758,
+        "kNN overlap with MiniLM's map, short text",
+        FINETYPE_EVAL,
+        series="kNN overlap",
+        corpus="short text",
+    ),
+    Figure(
+        0.40301,
+        "kNN overlap with MiniLM's map, very short strings",
+        FINETYPE_EVAL,
+        series="kNN overlap",
+        corpus="very short strings",
+    ),
+    Figure(
+        0.71005,
+        "cluster-structure retention vs MiniLM, long-form prose",
+        FINETYPE_EVAL,
+        series="region retention",
+        corpus="long-form prose",
+    ),
+    Figure(
+        0.66735,
+        "cluster-structure retention vs MiniLM, short text",
+        FINETYPE_EVAL,
+        series="region retention",
+        corpus="short text",
+    ),
+    Figure(
+        0.87503,
+        "cluster-structure retention vs MiniLM, very short strings",
+        FINETYPE_EVAL,
+        series="region retention",
+        corpus="very short strings",
+    ),
     Figure(0.39244, "potion-base-8M AMI over raw vectors, very short strings", FINETYPE_EVAL),
     Figure(0.35104, "all-MiniLM-L6-v2 AMI over raw vectors, very short strings", FINETYPE_EVAL),
-    Figure(3000, "rows sampled from each of the two large corpora", FINETYPE_EVAL),
-    Figure(216, "rows in the column-name corpus", FINETYPE_EVAL),
+    # Two entries for one value on purpose: the long-form and short-text corpora
+    # are separate samples that happen to be the same size, and assertion 5
+    # reads one table cell per corpus.
+    Figure(
+        3000,
+        "rows sampled from the 20 Newsgroups posts",
+        FINETYPE_EVAL,
+        series="corpus size",
+        corpus="long-form prose",
+    ),
+    Figure(
+        3000,
+        "rows sampled from their subject lines",
+        FINETYPE_EVAL,
+        series="corpus size",
+        corpus="short text",
+    ),
+    Figure(
+        216,
+        "rows in the column-name corpus",
+        FINETYPE_EVAL,
+        series="corpus size",
+        corpus="very short strings",
+    ),
     Figure(12, "classes in the column-name corpus", FINETYPE_EVAL),
     Figure(20, "nearest neighbours compared; also the 20 Newsgroups corpus name", FINETYPE_EVAL),
-    # Not ours. Published figures for the same model family, cited as such.
+    # Not ours. Published figures for the same model family, cited as such, and
+    # measured against Sentence-BERT rather than against all-MiniLM-L6-v2.
     Figure(0.901, "average precision on SprintDuplicateQuestions, potion-base-8M", SWIFTEMBED),
     Figure(0.847, "average precision on SprintDuplicateQuestions, Sentence-BERT", SWIFTEMBED),
     Figure(0.89, "low end of similarity and deduplication scores, as a share of SBERT", SWIFTEMBED),
@@ -117,14 +248,32 @@ FIGURES: list[Figure] = [
     Figure(0.75, "classification, as a share of SBERT", SWIFTEMBED),
 ]
 
-#: Assertion 4. Each pins a figure to what it is a figure of, so swapping two
-#: between corpora reddens even though the set of quantities is unchanged.
-#: Matched after whitespace is collapsed and case folded, so `description.yml`
-#: wrapping one across two lines does not hide it.
+#: Assertion 5. Summary-table row label → the series its cells are figures of.
+#: The `corpus` row is prose rather than numbers and is pinned in `CLAIMS`.
+TABLE_ROWS: dict[str, str] = {
+    "rows": "corpus size",
+    "nearest neighbours that survive": "kNN overlap",
+    "region structure kept": "region retention",
+}
+
+#: Assertion 6. Series a reader could mistake for a gradient. `region retention`
+#: is 71%, 67%, 88% — not monotone — and a sentence quoting 71% and 88% alone
+#: told a reader with one-line descriptions they were at the good end when the
+#: cited metric puts them at the worst. `corpus size` is left out: nobody claims
+#: a direction over sample sizes, and requiring all three would redden the
+#: sentence that says 216 rows is a small sample.
+DIRECTIONAL_SERIES: tuple[str, ...] = ("kNN overlap", "region retention")
+
+#: Assertion 4. Each pins a figure to what it is a figure of, or pins a
+#: distinction the page would otherwise lose in a rewrite. Matched after
+#: whitespace is collapsed and case folded, so `description.yml` wrapping one
+#: across two lines does not hide it.
 CLAIMS: list[str] = [
-    # AC4: the distinction the page was missing, in both files.
+    # AC4: the distinction the page was missing, in both files, and the one
+    # weakness that sits on the pairwise side of it.
     "pairwise judgement",
     "ranked retrieval",
+    "a false duplicate, which is a pairwise failure and not a ranked-retrieval one",
     # AC3: what it is good at, each with its figure.
     "90.1% average precision on SprintDuplicateQuestions where Sentence-BERT reports 84.7%",
     "89% to 100% of Sentence-BERT",
@@ -136,29 +285,86 @@ CLAIMS: list[str] = [
     "88% on very short strings",
     "13% are the same rows on long-form prose, 28% on short text, 40% on very short strings",
     "20 nearest neighbours",
-    # AC2: the direction of the shape dependence, not merely its existence.
-    "worst on long prose and mildest on short strings",
+    # AC2: the direction of the shape dependence for neighbourhoods, and the
+    # fact that region structure does not follow it.
+    "worst on long prose and mildest on very short strings",
+    "13%, then 28%, then 40% as the text gets shorter",
+    "short text is the weakest of the three for regions, not the middle of them",
+    # The summary table's one prose row. Its numeric rows are read against
+    # FIGURES by assertion 5, which a literal pin cannot do.
+    "| corpus | 20 Newsgroups posts | their subject lines | column names |",
 ]
 
-#: Assertion 5. Case-folded substring match over the collapsed section.
-BANNED: list[tuple[str, str]] = [
+#: Assertion 8, inside the section. Case-folded substring match.
+BANNED_IN_SECTION: list[tuple[str, str]] = [
     ("a minority", "the hedge a measured figure replaced; it is compatible with 45%"),
     ("recovers most", "the hedge a measured figure replaced"),
     ("most of the cluster", "the hedge a measured figure replaced"),
     ("on the evidence we have", "a hedge standing where the corpus and the sample size belong"),
-    ("faster", "speed is not part of the quality claim, deliberately"),
-    ("speedup", "speed is not part of the quality claim, deliberately"),
-    ("throughput", "speed is not part of the quality claim, deliberately"),
-    ("latency", "speed is not part of the quality claim, deliberately"),
-    ("per second", "speed is not part of the quality claim, deliberately"),
-    ("rows/s", "speed is not part of the quality claim, deliberately"),
+]
+
+#: Assertion 8, anywhere on either page. Speed is ruled out of the product claim
+#: and a speed figure three sections down reaches the same reader.
+BANNED_ON_PAGE: list[tuple[str, str]] = [
+    ("faster", "speed is not part of the published claim, deliberately"),
+    ("speedup", "speed is not part of the published claim, deliberately"),
+    ("throughput", "speed is not part of the published claim, deliberately"),
+    ("latency", "speed is not part of the published claim, deliberately"),
+    ("per second", "speed is not part of the published claim, deliberately"),
+    ("rows/s", "speed is not part of the published claim, deliberately"),
     ("×", "a multiplier is how a speed figure arrives; speed is ruled out here"),
+]
+
+#: Assertion 7. Words that assert a property over a whole set. Matched whole, so
+#: `all-MiniLM-L6-v2` and `overall` are not hits — though both are usually
+#: inside a code span and removed before this runs anyway.
+UNIVERSAL_WORDS: tuple[str, ...] = (
+    "every",
+    "everything",
+    "all",
+    "always",
+    "any",
+    "anything",
+    "each",
+    "never",
+    "only",
+    "none",
+)
+
+
+@dataclass(frozen=True)
+class Universal:
+    """A universal these sections may write, and why it holds over its set."""
+
+    phrase: str
+    why: str
+
+
+#: Assertion 7's exceptions, and the whole exception mechanism: a universal not
+#: written out here reddens. Kept short on purpose — every entry is a sentence
+#: nobody will re-derive, so the reason has to carry it.
+ALLOWED_UNIVERSALS: list[Universal] = [
+    Universal(
+        "any phrase and its shuffle land in the same place",
+        "permutation invariance is a property of the arithmetic mean rather than a sample of "
+        "it. `crates/staticembed-core` pools by averaging token vectors; "
+        "`the_pool_is_a_mean_so_order_is_lost_and_repetition_is_not` asserts it in Rust and "
+        "`test/sql/06_text_the_tokenizer_treats_as_one_value.sql` asserts it against a loaded "
+        "extension, so this quantifies over inputs nobody tried",
+    ),
 ]
 
 #: A number in prose. The lookbehind keeps the `6` of `all-MiniLM-L6-v2` out,
 #: and the lookahead keeps the `8` of `potion-base-8M` out while still admitting
 #: `top-20` and `13%`. Thousands separators are kept and stripped when parsed.
 QUANTITY = re.compile(r"(?<![\w.])(\d[\d,]*(?:\.\d+)?)\s*(%?)(?![\w-])")
+
+#: A whole word from `UNIVERSAL_WORDS`, over already-collapsed (case-folded) text.
+UNIVERSAL = re.compile(r"(?<![\w-])(" + "|".join(UNIVERSAL_WORDS) + r")(?![\w-])")
+
+#: A sentence end in collapsed prose. Trailing `*` and `_` are consumed so a
+#: bolded lead-in ends its sentence where a reader sees it end.
+SENTENCE_END = re.compile(r"(?<=[.;:!?])[*_]*\s+")
 
 FENCED = re.compile(r"```.*?```", re.DOTALL)
 INLINE_CODE = re.compile(r"`[^`\n]*`")
@@ -241,26 +447,41 @@ def quantities(section_text: str) -> list[tuple[float, int, str]]:
     return found
 
 
+def rounds_onto(figure: Figure, value: float, places: int) -> bool:
+    """Whether a quantity written to `places` places is a rounding of `figure`.
+
+    The interval is used rather than `round()` because `round()` has to pick a
+    side of a tie and 0.13185 is one: at four places it is as good a rounding to
+    0.1318 as to 0.1319, and a check that admits one spelling and reddens on the
+    other is arbitrary.
+    """
+    return abs(figure.value - value) <= 0.5 * 10.0**-places + 1e-12
+
+
 def measured(value: float, places: int) -> Figure | None:
     """The registered figure a written quantity is a rounding of, if there is one.
 
     A written quantity matches when the measurement falls inside the interval
     that rounds to it at the precision it was written to — `13%` covers
     everything from 0.125 to 0.135, so it covers a measured 0.13185, and `14%`
-    covers none of it. The interval is used rather than `round()` because
-    `round()` has to pick a side of a tie and 0.13185 is one: at four places it
-    is as good a rounding to 0.1318 as to 0.1319, and a check that admits one
-    spelling and reddens on the other is arbitrary.
+    covers none of it.
     """
-    tolerance = 0.5 * 10.0**-places
     for figure in FIGURES:
-        if abs(figure.value - value) <= tolerance + 1e-12:
+        if rounds_onto(figure, value, places):
+            return figure
+    return None
+
+
+def figure_for(series: str, corpus: str) -> Figure | None:
+    """The one registered figure for a series and a corpus. Assertion 5."""
+    for figure in FIGURES:
+        if figure.series == series and figure.corpus == corpus:
             return figure
     return None
 
 
 def unused_figures(*sections: str | None) -> list[str]:
-    """Registered figures no section writes. Assertion 7."""
+    """Registered figures no section writes. Assertion 10."""
     written = [
         (value, places)
         for text in sections
@@ -269,14 +490,163 @@ def unused_figures(*sections: str | None) -> list[str]:
     ]
     problems = []
     for figure in FIGURES:
-        if not any(
-            abs(figure.value - value) <= 0.5 * 10.0**-places + 1e-12 for value, places in written
-        ):
+        if not any(rounds_onto(figure, value, places) for value, places in written):
             problems.append(
                 f"FIGURES registers {figure.value} ({figure.what}, from {figure.source}) and "
                 f"neither page writes it. A permitted value nothing uses widens what the pages "
                 f"may say without anyone deciding to: delete it, or put the claim back"
             )
+    return problems
+
+
+def unused_allowances(*sections: str | None) -> list[str]:
+    """Permitted universals no section writes. Assertion 10."""
+    haystack = " ".join(collapse(strip_noise(text)) for text in sections if text is not None)
+    problems = []
+    for allowance in ALLOWED_UNIVERSALS:
+        if collapse(allowance.phrase) not in haystack:
+            problems.append(
+                f"ALLOWED_UNIVERSALS permits {allowance.phrase!r} and neither page writes it. A "
+                f"live exception to the universal-quantifier scan that no longer covers any "
+                f"sentence widens assertion 7 silently: delete it"
+            )
+    return problems
+
+
+def table(section_text: str) -> list[list[str]]:
+    """Every markdown table row in a section, as stripped cells, separators dropped."""
+    rows = []
+    for line in section_text.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in line[1:-1].split("|")]
+        if all(set(cell) <= set("-: ") and cell for cell in cells):
+            continue
+        rows.append(cells)
+    return rows
+
+
+def prose(section_text: str) -> str:
+    """The section with its table rows removed, for assertions read per sentence."""
+    kept = [
+        line
+        for line in section_text.splitlines()
+        if not (line.strip().startswith("|") and line.strip().endswith("|"))
+    ]
+    return "\n".join(kept)
+
+
+def table_problems(name: str, section_text: str) -> list[str]:
+    """The summary table's cells are the figures they claim to be. Assertion 5."""
+    rows = table(section_text)
+    headers = [row for row in rows if row and row[0] == "" and tuple(row[1:]) == CORPORA]
+    if len(headers) != 1:
+        actual = [row[1:] for row in rows if row and row[0] == ""]
+        return [
+            f"{name}'s `## {SECTION_HEADING}` section has no single summary table whose columns "
+            f"run {list(CORPORA)} in that order — found {actual}. Every figure below the header "
+            f"is read by its column, so a reordered or missing header is not a cosmetic edit"
+        ]
+    width = len(CORPORA)
+
+    problems = []
+    for label, series in TABLE_ROWS.items():
+        matches = [row for row in rows if row and row[0] == label]
+        if len(matches) != 1:
+            problems.append(
+                f"{name}'s summary table has {len(matches)} rows labelled {label!r} and needs "
+                f"exactly one: it is the row carrying the {series!r} figures"
+            )
+            continue
+        cells = matches[0][1:]
+        if len(cells) != width:
+            problems.append(
+                f"{name}'s summary table row {label!r} has {len(cells)} cells under "
+                f"{width} corpora"
+            )
+            continue
+        for corpus, cell in zip(CORPORA, cells):
+            expected = figure_for(series, corpus)
+            if expected is None:
+                problems.append(
+                    f"FIGURES registers no {series!r} figure for {corpus!r}, so the summary "
+                    f"table's {label!r} row cannot be checked against it"
+                )
+                continue
+            written = quantities(cell)
+            if len(written) != 1:
+                problems.append(
+                    f"{name}'s summary table cell for {label!r} under {corpus!r} is {cell!r}, "
+                    f"which carries {len(written)} quantities and needs exactly one"
+                )
+                continue
+            value, places, as_written = written[0]
+            if not rounds_onto(expected, value, places):
+                problems.append(
+                    f"{name}'s summary table puts `{as_written}` under {corpus!r} in the "
+                    f"{label!r} row, and the measured {series} for {corpus!r} is "
+                    f"{expected.value} ({expected.what}). Two cells swapped between corpora "
+                    f"leave the set of quantities on the page unchanged, which is why this is "
+                    f"read cell by cell"
+                )
+    return problems
+
+
+def series_problems(name: str, section_text: str) -> list[str]:
+    """No sentence writes part of a directional series. Assertion 6.
+
+    The summary table is excluded: its rows are read cell by cell against
+    `FIGURES` by assertion 5, which is a stronger statement than this one.
+    """
+    problems = []
+    for sentence in SENTENCE_END.split(collapse(strip_noise(prose(section_text)))):
+        for series in DIRECTIONAL_SERIES:
+            members = [figure for figure in FIGURES if figure.series == series]
+            written = {
+                figure.corpus
+                for value, places, _ in quantities(sentence)
+                for figure in members
+                if rounds_onto(figure, value, places)
+            }
+            if not written or len(written) == len(members):
+                continue
+            missing = [figure for figure in members if figure.corpus not in written]
+            problems.append(
+                f"{name} writes {len(written)} of the {len(members)} {series} figures in one "
+                f"sentence and leaves out "
+                + ", ".join(f"{figure.value} ({figure.corpus})" for figure in missing)
+                + f". The sentence is: {sentence.strip()[:160]!r}. A partial series reads as a "
+                f"direction, and {series} over {list(CORPORA)} is "
+                + ", ".join(str(figure.value) for figure in members)
+                + " — quote all three or the reader cannot tell a gradient from a dip"
+            )
+    return problems
+
+
+def universal_problems(name: str, section_text: str) -> list[str]:
+    """No unpermitted universal quantifier. Assertion 7."""
+    collapsed = collapse(strip_noise(section_text))
+    permitted = []
+    for allowance in ALLOWED_UNIVERSALS:
+        needle = collapse(allowance.phrase)
+        start = collapsed.find(needle)
+        while start != -1:
+            permitted.append((start, start + len(needle)))
+            start = collapsed.find(needle, start + 1)
+
+    problems = []
+    for match in UNIVERSAL.finditer(collapsed):
+        if any(low <= match.start() and match.end() <= high for low, high in permitted):
+            continue
+        context = collapsed[max(0, match.start() - 60) : match.end() + 60]
+        problems.append(
+            f"{name}'s section writes the universal {match.group(1)!r} in: …{context}…  A "
+            f"universal asserts one property over a whole set, and this section deliberately "
+            f"mixes our measurement with a third party's and figures that compare nothing, so a "
+            f"blanket sentence cancels the per-item sourcing the rest of it does. Rewrite it as "
+            f"a bounded claim, or add it to ALLOWED_UNIVERSALS with why it holds"
+        )
     return problems
 
 
@@ -306,34 +676,72 @@ def region_problems(name: str, section_text: str | None) -> list[str]:
     for claim in CLAIMS:
         if collapse(claim) not in collapsed:
             problems.append(f"{name}'s section does not carry the claim: {claim!r}")
-    for phrase, reason in BANNED:
+    for phrase, reason in BANNED_IN_SECTION:
         if collapse(phrase) in collapsed:
             problems.append(f"{name}'s section contains {phrase!r} — {reason}")
+    problems += table_problems(name, section_text)
+    problems += series_problems(name, section_text)
+    problems += universal_problems(name, section_text)
+    return problems
+
+
+def page_problems(name: str, page_text: str) -> list[str]:
+    """Assertion 8's page-wide half: speed vocabulary anywhere on the page."""
+    collapsed = collapse(strip_noise(page_text))
+    problems = []
+    for phrase, reason in BANNED_ON_PAGE:
+        if collapse(phrase) in collapsed:
+            position = collapsed.find(collapse(phrase))
+            context = collapsed[max(0, position - 70) : position + 70]
+            problems.append(
+                f"{name} contains {phrase!r} — {reason}. Found in: …{context}…  This ban is "
+                f"page-wide rather than section-wide: a speed figure under another heading "
+                f"reaches the same reader"
+            )
     return problems
 
 
 def disagreements(readme_text: str | None, descriptor_text: str | None) -> list[str]:
-    """Quantities one section carries and the other does not."""
+    """Quantities the two sections do not both write, the same number of times, in order."""
     if readme_text is None or descriptor_text is None:
         return []
-    in_readme = {round(value, 6) for value, _, _ in quantities(readme_text)}
-    in_descriptor = {round(value, 6) for value, _, _ in quantities(descriptor_text)}
+    in_readme = [(round(value, 6), written) for value, _, written in quantities(readme_text)]
+    in_descriptor = [
+        (round(value, 6), written) for value, _, written in quantities(descriptor_text)
+    ]
+
     problems = []
-    for value in sorted(in_readme - in_descriptor):
+    readme_counts = Counter(value for value, _ in in_readme)
+    descriptor_counts = Counter(value for value, _ in in_descriptor)
+    for value in sorted((readme_counts - descriptor_counts).elements()):
         problems.append(
-            f"{README} claims {value} in its quality section and {DESCRIPTOR} does not. "
-            f"{DESCRIPTOR} is the registry page; the two say the same thing about quality or "
-            f"neither can be trusted"
+            f"{README} claims {value} in its quality section and {DESCRIPTOR} does not, or does "
+            f"not claim it as often. {DESCRIPTOR} is the registry page; the two say the same "
+            f"thing about quality or neither can be trusted"
         )
-    for value in sorted(in_descriptor - in_readme):
+    for value in sorted((descriptor_counts - readme_counts).elements()):
         problems.append(
-            f"{DESCRIPTOR} claims {value} in its quality section and {README} does not"
+            f"{DESCRIPTOR} claims {value} in its quality section and {README} does not, or does "
+            f"not claim it as often"
         )
+    if problems:
+        return problems
+
+    for index, (left, right) in enumerate(zip(in_readme, in_descriptor)):
+        if left[0] != right[0]:
+            problems.append(
+                f"the two sections carry the same quantities in a different order: at position "
+                f"{index + 1}, {README} writes `{left[1]}` where {DESCRIPTOR} writes "
+                f"`{right[1]}`. A figure moved to another row or another corpus leaves the set "
+                f"of quantities unchanged, which is how a swapped summary-table cell used to "
+                f"pass this check in both directions"
+            )
+            break
     return problems
 
 
 def revision_problems(source_text: str) -> list[str]:
-    """The bundled model is the one the figures were measured on."""
+    """The bundled model has not moved off the revision these figures were published against."""
     match = re.search(r"Revision:\s*`([0-9a-f]{40})`", source_text)
     if match is None:
         return [
@@ -343,15 +751,31 @@ def revision_problems(source_text: str) -> list[str]:
     if match.group(1) != MEASURED_ON_REVISION:
         return [
             f"the bundled model is at revision {match.group(1)} and the published figures were "
-            f"measured on {MEASURED_ON_REVISION}. Vectors from two model versions are not "
-            f"comparable: re-run the harness and update FIGURES, or the page describes a model "
-            f"that is no longer in the binary"
+            f"transcribed against {MEASURED_ON_REVISION}. Vectors from two model versions are "
+            f"not comparable: re-run the harness and update FIGURES, or re-bless them here "
+            f"deliberately, rather than letting the page describe a model that is no longer in "
+            f"the binary"
         ]
     return []
 
 
-def self_test() -> int:
+def self_test() -> int:  # noqa: C901
     """Plant each defect this is meant to catch, and require it to be reported."""
+    # FIGURES itself: assertion 5 reads one figure per (series, corpus), so two
+    # entries claiming the same cell would make the table check pick arbitrarily.
+    cells = [(figure.series, figure.corpus) for figure in FIGURES if figure.series]
+    if len(cells) != len(set(cells)):
+        print(f"self-test FAILED: FIGURES registers a (series, corpus) twice: {cells}", file=sys.stderr)
+        return 1
+    for series in (*TABLE_ROWS.values(), *DIRECTIONAL_SERIES):
+        for corpus in CORPORA:
+            if figure_for(series, corpus) is None:
+                print(
+                    f"self-test FAILED: FIGURES registers no {series!r} figure for {corpus!r}",
+                    file=sys.stderr,
+                )
+                return 1
+
     # The quantity parser: what it must see, and what it must not.
     seen = {written for _, _, written in quantities("13% and 0.3924 and 3,000 rows and 216 names")}
     if seen != {"13%", "0.3924", "3,000", "216"}:
@@ -424,8 +848,157 @@ def self_test() -> int:
         print("self-test FAILED: an empty section reported clean", file=sys.stderr)
         return 1
 
+    # A summary table, then broken one cell and one header at a time.
+    good_table = (
+        "| | long-form prose | short text | very short strings |\n"
+        "|---|---|---|---|\n"
+        "| corpus | 20 Newsgroups posts | their subject lines | column names |\n"
+        "| rows | 3,000 | 3,000 | 216 |\n"
+        "| nearest neighbours that survive | 13% | 28% | 40% |\n"
+        "| region structure kept | 71% | 67% | 88% |\n"
+    )
+    if table_problems("a_file", good_table) != []:
+        print(
+            f"self-test FAILED: a correct summary table was reported: "
+            f"{table_problems('a_file', good_table)}",
+            file=sys.stderr,
+        )
+        return 1
+    for label, broken, needle in (
+        (
+            "two cells swapped between corpora",
+            good_table.replace(
+                "| nearest neighbours that survive | 13% | 28% | 40% |",
+                "| nearest neighbours that survive | 28% | 13% | 40% |",
+            ),
+            "swapped between corpora",
+        ),
+        (
+            "two cells transposed in the other row",
+            good_table.replace(
+                "| region structure kept | 71% | 67% | 88% |",
+                "| region structure kept | 67% | 71% | 88% |",
+            ),
+            "swapped between corpora",
+        ),
+        (
+            "a reversed header row",
+            good_table.replace(
+                "| | long-form prose | short text | very short strings |",
+                "| | very short strings | short text | long-form prose |",
+            ),
+            "in that order",
+        ),
+        (
+            "a deleted row",
+            good_table.replace("| region structure kept | 71% | 67% | 88% |\n", ""),
+            "needs exactly one",
+        ),
+        (
+            "an emptied cell",
+            good_table.replace(
+                "| rows | 3,000 | 3,000 | 216 |", "| rows | 3,000 | | 216 |"
+            ),
+            "needs exactly one",
+        ),
+        ("no table at all", "prose with no table in it", "no single summary table"),
+    ):
+        found = table_problems("a_file", broken)
+        if not any(needle in problem for problem in found):
+            print(f"self-test FAILED: {label} — got {found}", file=sys.stderr)
+            return 1
+
+    # A whole series in one sentence, and the endpoints-only sentence that is
+    # the defect: region structure is 71%, 67%, 88% and is not monotone.
+    whole = (
+        "It is worst on long prose and mildest on very short strings — 13%, then 28%, then 40% "
+        "as the text gets shorter. Region structure is 71% on long-form prose, 67% on short "
+        "text, 88% on very short strings."
+    )
+    if series_problems("a_file", whole) != []:
+        print(
+            f"self-test FAILED: two whole series were reported: "
+            f"{series_problems('a_file', whole)}",
+            file=sys.stderr,
+        )
+        return 1
+    endpoints = "It is worst on long prose and mildest on short strings — 13% against 40% on neighbours, 71% against 88% on regions."
+    found = series_problems("a_file", endpoints)
+    if not any("kNN overlap" in problem for problem in found):
+        print(f"self-test FAILED: an endpoints-only kNN sentence gave {found}", file=sys.stderr)
+        return 1
+    if not any("region retention" in problem for problem in found):
+        print(f"self-test FAILED: an endpoints-only region sentence gave {found}", file=sys.stderr)
+        return 1
+    if series_problems("a_file", "216 rows is a small sample, and 3,000 is not.") != []:
+        print(
+            "self-test FAILED: corpus sizes were treated as a directional series; a sentence "
+            "may cite one sample size without citing all three",
+            file=sys.stderr,
+        )
+        return 1
+    if series_problems("a_file", good_table) != []:
+        print("self-test FAILED: the summary table was read as a sentence", file=sys.stderr)
+        return 1
+
+    # The universal-quantifier scan, and its exception mechanism.
+    for label, text, word in (
+        ("every", "Every figure below compares the bundled model against MiniLM.", "every"),
+        ("all", "All of these figures are ours.", "all"),
+        ("only", "Only one of them is weak here.", "only"),
+        ("never", "This never loses cluster structure.", "never"),
+        ("everything", "Everything below that reads as a weakness is ranked retrieval.", "everything"),
+        ("always", "It always returns a unit vector.", "always"),
+        ("each", "Each figure here was measured on the bundled model.", "each"),
+        ("none", "None of these came from a third party.", "none"),
+    ):
+        found = universal_problems("a_file", text)
+        if not any(repr(word) in problem for problem in found):
+            print(f"self-test FAILED: the universal {label!r} was not reported: {found}", file=sys.stderr)
+            return 1
+    if universal_problems("a_file", "the figures below compare this model against MiniLM") != []:
+        print(
+            "self-test FAILED: a sentence with no quantifier word was reported — the scan is "
+            "documented as blind to a bare plural generic and must not pretend otherwise",
+            file=sys.stderr,
+        )
+        return 1
+    if universal_problems("a_file", "a vector from `all-MiniLM-L6-v2`") != []:
+        print("self-test FAILED: a model name in a code span was read as a universal", file=sys.stderr)
+        return 1
+    for allowance in ALLOWED_UNIVERSALS:
+        if universal_problems("a_file", allowance.phrase) != []:
+            print(
+                f"self-test FAILED: the permitted universal {allowance.phrase!r} was reported: "
+                f"{universal_problems('a_file', allowance.phrase)}",
+                file=sys.stderr,
+            )
+            return 1
+        if universal_problems("a_file", allowance.phrase.replace("shuffle", "reversal")) == []:
+            print(
+                f"self-test FAILED: {allowance.phrase!r} was permitted after its wording changed, "
+                f"so the allowance is matching more than the sentence it was written for",
+                file=sys.stderr,
+            )
+            return 1
+    if unused_allowances(" ".join(a.phrase for a in ALLOWED_UNIVERSALS)) != []:
+        print("self-test FAILED: a written allowance was reported unused", file=sys.stderr)
+        return 1
+    if unused_allowances("nothing here quantifies over anything") == []:
+        print(
+            "self-test FAILED: an allowance no page writes reported clean; a dead exception "
+            "widens the scan without anyone deciding to",
+            file=sys.stderr,
+        )
+        return 1
+
     # A section built from the claims themselves, then broken one way at a time.
-    good = " ".join(CLAIMS) + " 3,000 rows, 20 Newsgroups, 90.1%, 84.7%, 89% to 100%, 20."
+    good = (
+        " ".join(CLAIMS)
+        + " 3,000 rows, 20 Newsgroups, 90.1%, 84.7%, 89% to 100%, 20.\n"
+        + good_table
+        + "\nany phrase and its shuffle land in the same place.\n"
+    )
     for label, text, needle in (
         ("a complete section reports nothing", good, None),
         (
@@ -439,16 +1012,27 @@ def self_test() -> int:
             "does not carry the claim",
         ),
         (
-            "two figures swapped between corpora are caught",
+            "two figures swapped between corpora in the prose are caught",
             good.replace(
                 "13% are the same rows on long-form prose, 28% on short text",
                 "28% are the same rows on long-form prose, 13% on short text",
             ),
             "does not carry the claim",
         ),
+        (
+            "two figures swapped between corpora in the table are caught",
+            good.replace(
+                "| nearest neighbours that survive | 13% | 28% | 40% |",
+                "| nearest neighbours that survive | 28% | 13% | 40% |",
+            ),
+            "swapped between corpora",
+        ),
         ("a reinstated hedge is caught", good + " only a minority survive.", "a minority"),
-        ("a speed figure is caught", good + " it is 397 times faster.", "faster"),
-        ("a speed multiplier is caught", good + " a 397× speedup.", "speedup"),
+        (
+            "a blanket universal is caught",
+            good + " Every figure below compares the bundled model against MiniLM.",
+            "'every'",
+        ),
     ):
         found = region_problems("a_file", text)
         if needle is None:
@@ -457,6 +1041,21 @@ def self_test() -> int:
                 return 1
         elif not any(needle in problem for problem in found):
             print(f"self-test FAILED: {label} — got {found}", file=sys.stderr)
+            return 1
+
+    # Assertion 8's page-wide half. Its defect was a speed figure planted three
+    # sections below the quality claim, where a section-scoped ban never looked.
+    if page_problems("a_file", "a page with no speed claim on it") != []:
+        print("self-test FAILED: a clean page was reported", file=sys.stderr)
+        return 1
+    for label, text in (
+        ("a speed multiple", "## The SQL surface\n\nit is 397 times faster than a transformer."),
+        ("a row rate", "## The SQL surface\n\nit embeds 50,000 rows per second."),
+        ("a multiplier sign", "## The SQL surface\n\na 397× speedup."),
+        ("a latency claim", "## Why this exists\n\nlatency is bounded."),
+    ):
+        if page_problems("a_file", text) == []:
+            print(f"self-test FAILED: {label} outside the quality section reported clean", file=sys.stderr)
             return 1
 
     # The two files against each other. A figure in one and not the other is
@@ -471,8 +1070,22 @@ def self_test() -> int:
     if disagreements("the overlap is 13%", "the overlap is 14%") == []:
         print("self-test FAILED: two sections disagreeing on a figure were not", file=sys.stderr)
         return 1
+    if disagreements("13% then 28%", "28% then 13%") == []:
+        print(
+            "self-test FAILED: the same figures in a different order reported clean — a cell "
+            "moved to another row keeps the set unchanged and is the defect this must see",
+            file=sys.stderr,
+        )
+        return 1
+    if disagreements("3,000 and 3,000", "3,000") == []:
+        print(
+            "self-test FAILED: a figure written twice in one section and once in the other "
+            "reported clean; the summary table writes 3,000 in two columns",
+            file=sys.stderr,
+        )
+        return 1
 
-    # Assertion 7: a figure nothing writes any more.
+    # Assertion 10: a figure nothing writes any more.
     all_figures_written = " ".join(
         f"{figure.value}" for figure in FIGURES if figure.value not in (3000, 216, 12, 20)
     )
@@ -505,12 +1118,19 @@ def self_test() -> int:
         return 1
 
     print(
-        f"self-test ok: {len(FIGURES)} measured figures, {len(CLAIMS)} pinned claims and "
-        f"{len(BANNED)} banned phrases; 13% rounds onto 0.13185 and 14% and 45% do not; a "
-        f"renamed heading, an empty section, an unmeasured quantity, a dropped claim, two "
-        f"figures swapped between corpora, a reinstated hedge, a speed figure, a one-sided "
-        f"figure in either direction, a registered figure no page writes and a bumped model "
-        f"revision are each reported"
+        f"self-test ok: {len(FIGURES)} measured figures, {len(CLAIMS)} pinned claims, "
+        f"{len(TABLE_ROWS)} summary-table rows read cell by cell, {len(DIRECTIONAL_SERIES)} "
+        f"series that must be quoted whole, {len(UNIVERSAL_WORDS)} scanned quantifiers with "
+        f"{len(ALLOWED_UNIVERSALS)} recorded exception(s), {len(BANNED_IN_SECTION)} banned "
+        f"hedges and {len(BANNED_ON_PAGE)} page-wide speed phrases; 13% rounds onto 0.13185 and "
+        f"14% and 45% do not; a renamed heading, an empty section, an unmeasured quantity, a "
+        f"dropped claim, two figures swapped between corpora in prose and in the table, a "
+        f"reversed table header, a deleted table row, an emptied cell, a series quoted at its "
+        f"endpoints only, an unpermitted universal, a permitted universal whose wording moved, "
+        f"an exception no page writes, a reinstated hedge, a speed figure outside the quality "
+        f"section, a one-sided figure in either direction, the same figures in a different "
+        f"order, a figure written a different number of times, a registered figure no page "
+        f"writes and a bumped model revision are each reported"
     )
     return 0
 
@@ -553,13 +1173,17 @@ def main() -> int:
         )
         return 1
 
-    readme_section = section(readme_path.read_text(), SECTION_HEADING)
+    readme_text = readme_path.read_text()
+    readme_section = section(readme_text, SECTION_HEADING)
     descriptor_section = section(extended, SECTION_HEADING)
 
     problems += region_problems(README, readme_section)
     problems += region_problems(f"{DESCRIPTOR} (extended_description)", descriptor_section)
     problems += disagreements(readme_section, descriptor_section)
     problems += unused_figures(readme_section, descriptor_section)
+    problems += unused_allowances(readme_section, descriptor_section)
+    problems += page_problems(README, readme_text)
+    problems += page_problems(f"{DESCRIPTOR} (extended_description)", extended)
     problems += revision_problems(source_path.read_text())
 
     if problems:
@@ -571,10 +1195,13 @@ def main() -> int:
     counted = len({round(value, 6) for value, _, _ in quantities(readme_section or "")})
     print(
         f"ok: {README} and {DESCRIPTOR} carry the same {counted} measured quantities under "
-        f"`## {SECTION_HEADING}`, every one of them registered in FIGURES with its source, all "
-        f"{len(CLAIMS)} pinned claims present in both, no banned phrase in either, every one "
-        f"of the {len(FIGURES)} registered figures written on at least one page, and the "
-        f"bundled model still at the revision they were measured on"
+        f"`## {SECTION_HEADING}`, in the same order, every one of them registered in FIGURES "
+        f"with its source; all {len(CLAIMS)} pinned claims present in both; every summary-table "
+        f"cell the figure FIGURES registers for its row and column; no partial series in any "
+        f"sentence; no universal quantifier outside the {len(ALLOWED_UNIVERSALS)} recorded in "
+        f"ALLOWED_UNIVERSALS; no banned hedge in either section and no speed vocabulary anywhere "
+        f"on either page; every one of the {len(FIGURES)} registered figures written on at least "
+        f"one page; and the bundled model still at the revision they were published against"
     )
     return 0
 
