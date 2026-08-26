@@ -678,6 +678,20 @@ MUTATIONS: list[Mutation] = [
         kind="script",
         command=QUALITY_CLAIMS,
     ),
+    # The region sentence says 71% on long-form prose and 67% on short text, and
+    # the table two lines below says the same. Swapping which corpus each figure
+    # belongs to leaves the quantities, their count and their order untouched in
+    # both files, so assertions 2, 3, 5 and 6 all pass: what is left is a
+    # sentence contradicting its own table. Only the CLAIMS pin sees it, and
+    # until that pin existed this edit passed the whole check.
+    Mutation(
+        name="the_readme_swaps_the_corpora_in_the_region_sentence",
+        file="README.md",
+        old="71% on long-form prose, 67% on short text, 88% on very short strings",
+        new="71% on short text, 67% on long-form prose, 88% on very short strings",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
     # A blanket universal over a section that deliberately mixes our measurement
     # with a third party's, which cancels the per-item sourcing around it.
     Mutation(
@@ -747,6 +761,41 @@ MUTATIONS: list[Mutation] = [
         file="scripts/check_quality_claims.py",
         old="    for phrase, reason in BANNED_ON_PAGE:",
         new="    for phrase, reason in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The speed ban is the one scan that reads code, because the SQL examples
+    # are where a speed figure hides and `description.yml` publishes all of
+    # them in fenced blocks. Reading it after `strip_noise` instead makes it
+    # page-minus-code-wide, which is what it silently was.
+    Mutation(
+        name="the_speed_ban_stops_looking_inside_the_sql_examples",
+        file="scripts/check_quality_claims.py",
+        old="    collapsed = collapse(strip_addresses(page_text))",
+        new="    collapsed = collapse(strip_noise(page_text))",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # These two are the assertions a sweep found could be deleted with every
+    # self-test case still green, because in each the case was satisfied by a
+    # neighbouring assertion: the hedge case planted `only a minority survive`
+    # and the universal scan reported the `only`, and the empty-section case
+    # asked only that something was reported, which the missing CLAIMS pins
+    # do on their own. Both cases now name the message their own assertion
+    # produces, and these two mutations are what says so.
+    Mutation(
+        name="the_quality_check_stops_banning_the_hedges_the_figures_replaced",
+        file="scripts/check_quality_claims.py",
+        old="    for phrase, reason in BANNED_IN_SECTION:",
+        new="    for phrase, reason in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_reporting_an_empty_section_as_empty",
+        file="scripts/check_quality_claims.py",
+        old="    if not collapsed:",
+        new="    if False:",
         kind="script",
         command=QUALITY_CLAIMS_SELF_TEST,
     ),

@@ -50,7 +50,10 @@ WHAT IS ASSERTED
        because the embedding-only number is an order of magnitude larger than
        the end-to-end one, and a speed figure planted under *The SQL surface*
        flatters the product to the same reader as one planted here. That ban is
-       page-wide for that reason, not section-wide.
+       page-wide for that reason, not section-wide, and it is the one scan that
+       reads code as well as prose: `description.yml` publishes its SQL
+       examples in fenced blocks, so a ban that ran after code was stripped was
+       page-minus-code-wide and left the surface it was widened to cover open.
     9. The bundled model has not moved off `MEASURED_ON_REVISION`.
    10. Every entry in `FIGURES` and every entry in `ALLOWED_UNIVERSALS` is
        written on at least one of the two pages. A permitted value or a
@@ -88,8 +91,8 @@ WHAT THE UNIVERSAL-QUANTIFIER SCAN COVERS, AND WHAT IT CANNOT SEE
     It is scoped to the two quality sections and not to the whole page. The rest
     of `README.md` is full of true universals about a deterministic function
     ("`embed(NULL)` is always NULL"), and a scan that cried wolf there would be
-    turned off. The speed ban in assertion 8 is the one that runs page-wide,
-    because that is where its defect was planted.
+    turned off. The speed ban in assertion 8 is the one that runs page-wide and
+    into the code examples, because that is where its defects were planted.
 
 WHAT IS NOT ASSERTED
     That the figures are true. `FIGURES` is a transcription of a measurement
@@ -289,6 +292,14 @@ CLAIMS: list[str] = [
     # fact that region structure does not follow it.
     "worst on long prose and mildest on very short strings",
     "13%, then 28%, then 40% as the text gets shorter",
+    # The region sentence, tied to its corpora rather than to its conclusion.
+    # Its trailing clause survives the first two figures being transposed, and
+    # a transposed pair passes assertions 2, 3, 5 and 6 untouched: both values
+    # stay registered, both files agree, the table is not edited and the series
+    # is still quoted whole. What it leaves is a sentence that contradicts the
+    # table two lines below it and tells a reader with one-line descriptions
+    # the wrong end to be at, which is the defect this page was rewritten for.
+    "71% on long-form prose, 67% on short text, 88% on very short strings",
     "short text is the weakest of the three for regions, not the middle of them",
     # The summary table's one prose row. Its numeric rows are read against
     # FIGURES by assertion 5, which a literal pin cannot do.
@@ -374,19 +385,29 @@ ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 
 
-def strip_noise(text: str) -> str:
-    """Remove everything in a section that is code or an address, not a claim.
+def strip_addresses(text: str) -> str:
+    """Remove links, bare URLs and dates. Code is left where it is.
 
-    SQL examples are checked by `check_description_examples.py` against a real
-    build, and a URL is not a quantity — `arxiv.org/abs/2510.24793` would
-    otherwise read as one.
+    An address is not a quantity — `arxiv.org/abs/2510.24793` and `2026-08-24`
+    both parse as one — and neither is it a claim about the product. Code is a
+    different matter: it is where a speed figure hides. This is what assertion
+    8's page-wide half scans, so that half reads the SQL examples too.
     """
-    text = FENCED.sub(" ", text)
-    text = INLINE_CODE.sub(" ", text)
     text = LINK_TARGET.sub("]", text)
     text = BARE_URL.sub(" ", text)
     text = ISO_DATE.sub(" ", text)
     return text
+
+
+def strip_noise(text: str) -> str:
+    """Remove everything in a section that is code or an address, not a claim.
+
+    SQL examples are checked by `check_description_examples.py` against a real
+    build, so a number inside one is not a published figure.
+    """
+    text = FENCED.sub(" ", text)
+    text = INLINE_CODE.sub(" ", text)
+    return strip_addresses(text)
 
 
 def collapse(text: str) -> str:
@@ -686,8 +707,15 @@ def region_problems(name: str, section_text: str | None) -> list[str]:
 
 
 def page_problems(name: str, page_text: str) -> list[str]:
-    """Assertion 8's page-wide half: speed vocabulary anywhere on the page."""
-    collapsed = collapse(strip_noise(page_text))
+    """Assertion 8's page-wide half: speed vocabulary anywhere on the page.
+
+    Read over `strip_addresses` and not `strip_noise`, so fenced blocks and
+    inline code spans are scanned as well as prose. `description.yml` publishes
+    its SQL examples in fences and `README.md` carries six more, which is the
+    surface this ban was widened to cover: a speed figure in a comment inside
+    one reaches the same reader as a speed figure in a sentence.
+    """
+    collapsed = collapse(strip_addresses(page_text))
     problems = []
     for phrase, reason in BANNED_ON_PAGE:
         if collapse(phrase) in collapsed:
@@ -760,7 +788,23 @@ def revision_problems(source_text: str) -> list[str]:
 
 
 def self_test() -> int:  # noqa: C901
-    """Plant each defect this is meant to catch, and require it to be reported."""
+    """Plant each defect this is meant to catch, and require it to be reported.
+
+    Each case plants one defect and names a needle the assertion it is written
+    for produces. That is not a detail of style. A case whose needle some
+    neighbouring assertion also satisfies proves nothing about its own, and
+    this file shipped one: `("a reinstated hedge", good + " only a minority
+    survive.", "a minority")` planted a hedge in a sentence carrying `only`, so
+    the universal scan's message quoted the planted text back and satisfied the
+    needle. `BANNED_IN_SECTION`'s enforcement could be deleted with every case
+    here green.
+
+    For the assertions named in `scripts/mutation_check.py` that is measured
+    rather than asserted: each of those mutations disables one assertion and
+    requires this self-test to redden. The rest of the assertions below have a
+    case and no mutation, so for them this paragraph is a discipline and not a
+    guarantee.
+    """
     # FIGURES itself: assertion 5 reads one figure per (series, corpus), so two
     # entries claiming the same cell would make the table check pick arbitrarily.
     cells = [(figure.series, figure.corpus) for figure in FIGURES if figure.series]
@@ -781,7 +825,13 @@ def self_test() -> int:  # noqa: C901
     if seen != {"13%", "0.3924", "3,000", "216"}:
         print(f"self-test FAILED: the quantity parser found {seen}", file=sys.stderr)
         return 1
-    for identifier in ("potion-base-8M", "all-MiniLM-L6-v2", "`SELECT 41 + 1;`"):
+    for identifier in (
+        "potion-base-8M",
+        "all-MiniLM-L6-v2",
+        "`SELECT 41 + 1;`",
+        "```sql\nSELECT 41 + 1;\n```",
+        "measured on 2026-08-24",
+    ):
         found = quantities(identifier)
         if found:
             print(
@@ -841,11 +891,23 @@ def self_test() -> int:  # noqa: C901
     if section(document + f"\n## {SECTION_HEADING}\n\nagain\n", SECTION_HEADING) is not None:
         print("self-test FAILED: a duplicated heading was not reported", file=sys.stderr)
         return 1
-    if region_problems("a_file", None) == []:
-        print("self-test FAILED: a missing section reported clean", file=sys.stderr)
+    # Both of these name the message they are written for. `== []` was enough
+    # for the missing-section case and was not enough for the empty-section
+    # one: an empty section fails every pin in CLAIMS as well, so the guard
+    # could be deleted and this case still passed.
+    if not any("it is not checking" in problem for problem in region_problems("a_file", None)):
+        print(
+            f"self-test FAILED: a missing section was not reported as missing: "
+            f"{region_problems('a_file', None)}",
+            file=sys.stderr,
+        )
         return 1
-    if region_problems("a_file", "\n") == []:
-        print("self-test FAILED: an empty section reported clean", file=sys.stderr)
+    if not any("agrees with anything" in problem for problem in region_problems("a_file", "\n")):
+        print(
+            f"self-test FAILED: an empty section was not reported as empty: "
+            f"{region_problems('a_file', chr(10))}",
+            file=sys.stderr,
+        )
         return 1
 
     # A summary table, then broken one cell and one header at a time.
@@ -937,8 +999,17 @@ def self_test() -> int:  # noqa: C901
             file=sys.stderr,
         )
         return 1
-    if series_problems("a_file", good_table) != []:
-        print("self-test FAILED: the summary table was read as a sentence", file=sys.stderr)
+    # A row writing two of the three region figures. The whole table cannot
+    # fail this case — it writes every figure of both series, so it is not a
+    # partial series however it is read — and a case that cannot fail is not a
+    # case. The row is what `prose` has to remove.
+    if series_problems("a_file", "| region structure kept | 71% | 67% |\n") != []:
+        print(
+            "self-test FAILED: a table row writing two of the three region figures was read as "
+            "a sentence. The table's cells are checked against FIGURES by assertion 5, which is "
+            "stronger, and a row is not a claim about a direction",
+            file=sys.stderr,
+        )
         return 1
 
     # The universal-quantifier scan, and its exception mechanism.
@@ -1027,7 +1098,27 @@ def self_test() -> int:  # noqa: C901
             ),
             "swapped between corpora",
         ),
-        ("a reinstated hedge is caught", good + " only a minority survive.", "a minority"),
+        # Two hedges, each planted so that nothing but the BANNED_IN_SECTION
+        # scan has anything to say about it: no universal, no quantity, no pin
+        # broken. The first of these read "only a minority survive", and the
+        # `only` meant the universal scan's message carried the needle `a
+        # minority` in its quoted context — so the hedge ban could be deleted
+        # and this whole suite stayed green. A needle a neighbouring assertion
+        # can satisfy proves nothing about the assertion it is written for.
+        ("a reinstated hedge is caught by the hedge ban", good + " a minority survive.", "a minority"),
+        (
+            "the hedge the region figures replaced is caught by the hedge ban",
+            good + " it recovers most of the cluster structure.",
+            "recovers most",
+        ),
+        (
+            "the region sentence's two corpora swapped are caught",
+            good.replace(
+                "71% on long-form prose, 67% on short text",
+                "71% on short text, 67% on long-form prose",
+            ),
+            "71% on long-form prose, 67% on short text",
+        ),
         (
             "a blanket universal is caught",
             good + " Every figure below compares the bundled model against MiniLM.",
@@ -1053,9 +1144,40 @@ def self_test() -> int:  # noqa: C901
         ("a row rate", "## The SQL surface\n\nit embeds 50,000 rows per second."),
         ("a multiplier sign", "## The SQL surface\n\na 397× speedup."),
         ("a latency claim", "## Why this exists\n\nlatency is bounded."),
+        # And the same figures written where the SQL examples live. That is the
+        # surface this ban was widened to cover — `description.yml` publishes
+        # every example in a fenced block and `README.md` carries six more —
+        # and a ban read after `strip_noise` had already looked at none of it.
+        (
+            "a speed claim in a comment inside a fenced example",
+            "## The SQL surface\n\n```sql\n-- 50,000 rows per second\nSELECT embed(name) FROM t;\n```",
+        ),
+        (
+            "a speed claim inside an inline code span",
+            "## The SQL surface\n\nthe comment reads `-- 397\u00d7 faster` in that example.",
+        ),
     ):
         if page_problems("a_file", text) == []:
             print(f"self-test FAILED: {label} outside the quality section reported clean", file=sys.stderr)
+            return 1
+    # Reading code is not reading addresses. A URL that spells a banned word is
+    # an address, and `strip_addresses` is the only thing keeping it out now
+    # that this scan no longer runs after code has been removed.
+    for label, text in (
+        # A relative target, not an http one: `BARE_URL` would strip an http
+        # target on its own, so a case built from one leaves LINK_TARGET with
+        # nothing only it can do. README.md links `models/potion-base-8M/
+        # SOURCE.md` this way.
+        ("a relative link target", "see [the note](notes/10x-faster-embeddings.md)"),
+        ("a bare URL", "see https://example.invalid/faster-than-sbert for the write-up"),
+        ("a fenced example with no claim in it", "```sql\nSELECT embed('a') FROM t;\n```"),
+    ):
+        if page_problems("a_file", text) != []:
+            print(
+                f"self-test FAILED: {label} was read as a speed claim: "
+                f"{page_problems('a_file', text)}",
+                file=sys.stderr,
+            )
             return 1
 
     # The two files against each other. A figure in one and not the other is
@@ -1123,14 +1245,16 @@ def self_test() -> int:  # noqa: C901
         f"series that must be quoted whole, {len(UNIVERSAL_WORDS)} scanned quantifiers with "
         f"{len(ALLOWED_UNIVERSALS)} recorded exception(s), {len(BANNED_IN_SECTION)} banned "
         f"hedges and {len(BANNED_ON_PAGE)} page-wide speed phrases; 13% rounds onto 0.13185 and "
-        f"14% and 45% do not; a renamed heading, an empty section, an unmeasured quantity, a "
-        f"dropped claim, two figures swapped between corpora in prose and in the table, a "
-        f"reversed table header, a deleted table row, an emptied cell, a series quoted at its "
-        f"endpoints only, an unpermitted universal, a permitted universal whose wording moved, "
-        f"an exception no page writes, a reinstated hedge, a speed figure outside the quality "
-        f"section, a one-sided figure in either direction, the same figures in a different "
-        f"order, a figure written a different number of times, a registered figure no page "
-        f"writes and a bumped model revision are each reported"
+        f"14% and 45% do not; a renamed heading, an empty section reported as empty rather "
+        f"than as its missing claims, an unmeasured quantity, a dropped claim, two figures "
+        f"swapped between corpora in prose and in the table, the region sentence's two corpora "
+        f"swapped, a reversed table header, a deleted table row, an emptied cell, a series "
+        f"quoted at its endpoints only, an unpermitted universal, a permitted universal whose "
+        f"wording moved, an exception no page writes, a hedge reinstated in a sentence with "
+        f"nothing else wrong with it, a speed figure outside the quality section and a speed "
+        f"figure inside a fenced example, a one-sided figure in either direction, the same "
+        f"figures in a different order, a figure written a different number of times, a "
+        f"registered figure no page writes and a bumped model revision are each reported"
     )
     return 0
 
@@ -1200,7 +1324,8 @@ def main() -> int:
         f"cell the figure FIGURES registers for its row and column; no partial series in any "
         f"sentence; no universal quantifier outside the {len(ALLOWED_UNIVERSALS)} recorded in "
         f"ALLOWED_UNIVERSALS; no banned hedge in either section and no speed vocabulary anywhere "
-        f"on either page; every one of the {len(FIGURES)} registered figures written on at least "
+        f"on either page, in its code examples as well as its prose; every one of the "
+        f"{len(FIGURES)} registered figures written on at least "
         f"one page; and the bundled model still at the revision they were published against"
     )
     return 0
