@@ -1410,7 +1410,11 @@ def self_test() -> int:  # noqa: C901
     for label, text in (
         ("a speed multiple", "## The SQL surface\n\nit is 397 times faster than a transformer."),
         ("a row rate", "## The SQL surface\n\nit embeds 50,000 rows per second."),
-        ("a multiplier sign", "## The SQL surface\n\na 397× speedup."),
+        # Two cases rather than one. `a 397× speedup.` satisfies BANNED_ON_PAGE's
+        # `speedup` and its `×` at once, so either could be deleted and the other
+        # kept this case green. Each of these is reported by one phrase and no other.
+        ("a speedup noun with no multiplier sign", "## The SQL surface\n\na 397x speedup."),
+        ("a multiplier sign with no speed noun", "## The SQL surface\n\na 397× improvement."),
         ("a latency claim", "## Why this exists\n\nlatency is bounded."),
         # And the same figures written where the SQL examples live. That is the
         # surface this ban was widened to cover — `description.yml` publishes

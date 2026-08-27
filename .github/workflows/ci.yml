@@ -141,12 +141,17 @@ jobs:
         run: python3 scripts/mutation_check.py --check-anchors
 
       # And the checks themselves: neuter one branch of a checked script at a
-      # time and require the script to come back non-zero. This runs here rather
-      # than staying local because it needs no build and no duckdb, and the
-      # whole sweep is under a minute. It is what catches an assertion that can
-      # be deleted with every gate green, which until now was found only by
-      # somebody reading the file.
-      - name: Every assertion in the checked scripts can fail
+      # time and require the script to come back non-zero. It runs here rather
+      # than staying local because it needs no build and no duckdb.
+      #
+      # What it reaches is `if`, `for` and `problems +=` in the functions each
+      # target does not exclude — this script's own `main` among them, which was
+      # excluded by name until the sweep was pointed at it and reported five of
+      # its six sites deletable with every Python gate at exit 0. What it does
+      # not reach is list content: an entry dropped from CLAIMS, PAGE_FIELDS or
+      # BANNED_ON_PAGE is not a branch. The script's docstring names which of
+      # those are open and hands them to scripts/mutation_check.py.
+      - name: The branches this sweep enumerates redden when neutered
         run: |
           python3 scripts/check_assertions_can_fail.py --self-test
           python3 scripts/check_assertions_can_fail.py

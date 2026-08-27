@@ -12,13 +12,19 @@ Every review of `check_quality_claims.py` so far has found an assertion that
 could be deleted with every gate green, and every one of those was found by a
 person reading the file. Reading it once more would have found the next. Running
 it does not depend on anybody's attention, and the first thing it did when
-pointed at itself was report two site kinds its own self-test never exercised:
+pointed at itself was report two site kinds its own self-test never exercised.
+The second thing it did, once it was pointed at its own `main` as well, was
+report that `main`'s loop over the targets, its accumulation into `problems`,
+its `if problems:` and both of its report loops could each be deleted while
+every Python gate stayed at exit 0 — which is the defect this file exists to
+find, in this file, hidden behind an exclusion written for one line and applied
+to a whole function.
 
 WHAT IT DOES
     For each `Target` below, parse the script and enumerate every site where a
     decision is taken — `if <test>:`, `for <name> in <iterable>:`, and
-    `problems += <call>` — outside the functions named in `not_swept`, which are
-    the script's own self-test machinery and would only be measuring itself.
+    `problems += <call>` — outside the functions listed in `not_swept`, which
+    are the script's own self-test machinery and would only be measuring itself.
     Neuter one site at a time (`if False:`, `for x in []:`, `problems += []`),
     run the script's own commands, and require at least one of them to come back
     non-zero. A site where every command still exits 0 is a line that can be
@@ -30,6 +36,14 @@ WHAT IT DOES
     what the sweep tolerates. That is the same shape as `ALLOWED_UNIVERSALS` in
     `check_quality_claims.py`, and for the same reason.
 
+    `not_swept` carries a reason per entry and is held to the second half of
+    that rule: an entry naming a function the file does not define is reported.
+    It was a bare tuple of names with neither property, which is how this file's
+    own entry came to list `main` — one line of it genuinely unmeasurable, five
+    of them nobody had looked at. It remains the blunter of the two hatches,
+    because it excludes a whole function: adding `"run"` to
+    `check_quality_claims.py`'s entry drops that sweep from 69 sites to 56.
+
 WHAT IT DOES NOT DO
     It does not neuter a guard in the other direction. `if <test>:` becomes
     `if False:` and never `if True:`, so a condition that must *not* fire — a
@@ -39,6 +53,21 @@ WHAT IT DOES NOT DO
     regex that matches nothing, a constant edited: none of those are branches
     and none are enumerated. `SENTENCE_END` compiling to something that matches
     nothing was one of those, and it is a real hole this cannot see. The
+    hand-written table in `scripts/mutation_check.py` is where a breakage of
+    that shape goes.
+
+    It does not measure list content. `CLAIMS`, `PAGE_FIELDS` and
+    `BANNED_ON_PAGE` in `check_quality_claims.py` are lists an assertion reads
+    rather than branches, so an entry deleted from one is invisible here.
+    Entries in all three are invisible to that file's own self-test too, which
+    is a live hole and not a limitation of this sweep: `CLAIMS` builds the
+    fixture its cases run against — `good = " ".join(CLAIMS)` — so an entry
+    witnesses itself and nothing else does, and dropping one stops it pinning
+    the published sentence it was written for; `PAGE_FIELDS` losing
+    `("docs", "extended_description")` goes unreported; and `throughput` and
+    `rows/s` in `BANNED_ON_PAGE` have no case that they alone satisfy, so
+    dropping `throughput` would let a throughput claim ship as the opening line
+    of the registry entry. Measured on this tree, and left open. The
     hand-written table in `scripts/mutation_check.py` is where a breakage of
     that shape goes.
 
@@ -59,7 +88,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+import dataclasses
+import json
+import os
 import pathlib
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -70,6 +104,32 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: Long enough that a slow machine is not a failure, short enough that a neuter
 #: which turns a loop infinite does not hold a CI runner for an hour.
 TIMEOUT_SECONDS = 120
+
+#: Set in the environment of every command the sweep runs, and refused by `run`.
+#: Without it, neutering `main`'s dispatch to `self_test` turns the `--self-test`
+#: this sweep runs against itself into another live sweep, which sweeps this file
+#: again. Measured before the refusal existed: the outer command hit
+#: TIMEOUT_SECONDS, `subprocess.run` killed the process it started and not the
+#: tree beneath it, and the orphans were still rewriting
+#: `scripts/check_assertions_can_fail.py` four seconds after the sweep's `finally`
+#: had put it back.
+SWEEP_MARKER = "STATICEMBED_SWEEP_RUNNING"
+
+
+@dataclass(frozen=True)
+class Unswept:
+    """A function whose body is not swept, and why measuring it would measure nothing.
+
+    The same two properties as `Allowed`, for the same reason. This started as a
+    bare tuple of names, which is an escape hatch with no reason attached and no
+    check that it still names anything: adding `"run"` to
+    `check_quality_claims.py`'s entry drops that sweep from sixty-nine sites to
+    fifty-six, silently, and a name left behind by a rename goes on excluding
+    nothing while reading as though it excludes something.
+    """
+
+    function: str
+    why: str
 
 
 @dataclass(frozen=True)
@@ -96,8 +156,12 @@ class Target:
     #: Functions whose bodies are not swept, because they are the harness
     #: rather than the check: neutering a branch of a self-test measures the
     #: self-test against itself and reports whatever it likes.
-    not_swept: tuple[str, ...]
+    not_swept: tuple[Unswept, ...]
     allowed: tuple[Allowed, ...]
+
+    def unswept(self) -> tuple[str, ...]:
+        """Just the names, for `sites`."""
+        return tuple(exclusion.function for exclusion in self.not_swept)
 
 
 TARGETS: tuple[Target, ...] = (
@@ -107,7 +171,12 @@ TARGETS: tuple[Target, ...] = (
             ("python3", "scripts/check_quality_claims.py", "--self-test"),
             ("python3", "scripts/check_quality_claims.py"),
         ),
-        not_swept=("self_test", "stage_tree", "staged_run", "staged_process"),
+        not_swept=(
+            Unswept("self_test", "the harness: neutering a branch of it measures it against itself"),
+            Unswept("stage_tree", "harness — writes the two-page tree a case plants its defect in"),
+            Unswept("staged_run", "harness — calls `run` over a staged tree and captures what it printed"),
+            Unswept("staged_process", "harness — runs that file as a process over a staged tree"),
+        ),
         allowed=(
             Allowed(
                 function="table_problems",
@@ -129,15 +198,21 @@ TARGETS: tuple[Target, ...] = (
             ),
         ),
     ),
-    # This file, measured by its own self-test. `main` is not swept: neutering
-    # its dispatch makes `--self-test` run the live sweep, which sweeps this
-    # target, which spawns `--self-test` again. That is the same bootstrap hole
-    # the other target records in `allowed`, and here it also recurses, so it is
-    # excluded rather than permitted.
+    # This file, measured by its own self-test. `main` was excluded here by name
+    # until the sweep was pointed at itself with only `self_test` excluded and
+    # reported five of `main`'s six sites surviving: the loop over the targets,
+    # the accumulation into `problems`, `if problems:` and both report loops
+    # could each be deleted with every Python gate at exit 0. The reason written
+    # against the exclusion — that a neutered dispatch recurses — was true of
+    # `args.self_test` and of nothing else it excluded. `run` is the split that
+    # let the other five be driven; SWEEP_MARKER is what makes the sixth redden
+    # in milliseconds instead of recursing.
     Target(
         script="scripts/check_assertions_can_fail.py",
         commands=(("python3", "scripts/check_assertions_can_fail.py", "--self-test"),),
-        not_swept=("self_test", "main"),
+        not_swept=(
+            Unswept("self_test", "the harness: neutering a branch of it measures it against itself"),
+        ),
         allowed=(),
     ),
 )
@@ -207,16 +282,38 @@ def sites(source: str, not_swept: tuple[str, ...]) -> list[Site]:
 
 
 def reddened(root: pathlib.Path, commands: tuple[tuple[str, ...], ...]) -> bool:
-    """Whether any command comes back non-zero. A command that hangs counts as noticing."""
+    """Whether any command comes back non-zero. A command that hangs counts as noticing.
+
+    SWEEP_MARKER goes into every child's environment so that a command which
+    reaches the live sweep — which is what a neutered `--self-test` dispatch
+    does — refuses instead of sweeping the tree that is already being swept.
+
+    The child gets its own session so that a hang can be killed as a group.
+    `subprocess.run(timeout=...)` kills the process it started and nothing
+    beneath it: measured on a command that had been neutered into recursing,
+    twenty-three orphans outlived the timeout and were still rewriting the
+    swept file four seconds after `survivors`' own `finally` had put it back.
+    A sweep that can leave the tree it swept modified is worse than no sweep.
+    """
+    environment = {**os.environ, SWEEP_MARKER: "1"}
     for command in commands:
         argv = [sys.executable if part == "python3" else part for part in command]
+        child = subprocess.Popen(  # noqa: S603
+            argv,
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=environment,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                argv, cwd=root, capture_output=True, text=True, timeout=TIMEOUT_SECONDS
-            )
+            child.communicate(timeout=TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            os.killpg(os.getpgid(child.pid), signal.SIGKILL)
+            child.communicate()
             return True
-        if completed.returncode != 0:
+        if child.returncode != 0:
             return True
     return False
 
@@ -225,7 +322,7 @@ def survivors(root: pathlib.Path, target: Target) -> tuple[list[Site], int]:
     """The sites that stay green when neutered, and how many were tried."""
     path = root / target.script
     source = path.read_text()
-    swept = sites(source, target.not_swept)
+    swept = sites(source, target.unswept())
     green: list[Site] = []
     try:
         for site in swept:
@@ -240,6 +337,7 @@ def survivors(root: pathlib.Path, target: Target) -> tuple[list[Site], int]:
 def problems_for(root: pathlib.Path, target: Target) -> tuple[list[str], int, int]:
     """Everything wrong with one target: unallowed survivors, and allowances nothing needs."""
     green, tried = survivors(root, target)
+    source = (root / target.script).read_text()
     problems = []
     for site in green:
         if not any(a.function == site.function and a.source == site.source for a in target.allowed):
@@ -250,7 +348,19 @@ def problems_for(root: pathlib.Path, target: Target) -> tuple[list[str], int, in
                 f"reason it cannot fail"
             )
     live = {(site.function, site.source) for site in green}
-    every = {(site.function, site.source) for site in sites((root / target.script).read_text(), target.not_swept)}
+    every = {(site.function, site.source) for site in sites(source, target.unswept())}
+    defined = {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for exclusion in target.not_swept:
+        if exclusion.function not in defined:
+            problems.append(
+                f"{target.script}: `not_swept` skips `{exclusion.function}` and the file defines "
+                f"no such function. An exclusion left behind by a rename excludes nothing while "
+                f"reading as though it excludes something: delete the entry or repoint it"
+            )
     for allowance in target.allowed:
         key = (allowance.function, allowance.source)
         if key not in every:
@@ -266,6 +376,68 @@ def problems_for(root: pathlib.Path, target: Target) -> tuple[list[str], int, in
                 f"widens this sweep without anyone deciding to: delete the entry"
             )
     return problems, len(green), tried
+
+
+def targets_from(described: pathlib.Path) -> tuple[Target, ...]:
+    """The targets a JSON file describes, instead of `TARGETS`.
+
+    Only `self_test` passes `--targets`. It is how a case drives this entry
+    point end to end over a tree it staged, without the staged tree having to
+    contain the real scripts `TARGETS` names — which is what would turn the
+    staged sweep back into a sweep of this file.
+    """
+    return tuple(
+        Target(
+            script=entry["script"],
+            commands=tuple(tuple(command) for command in entry["commands"]),
+            not_swept=tuple(Unswept(**exclusion) for exclusion in entry["not_swept"]),
+            allowed=tuple(Allowed(**allowance) for allowance in entry["allowed"]),
+        )
+        for entry in json.loads(described.read_text())
+    )
+
+
+def run(root: pathlib.Path, targets: tuple[Target, ...]) -> int:
+    """The whole sweep over one tree: judge every target, report, return an exit code.
+
+    Split out of `main` so that `self_test` can drive it over a staged tree.
+    That split is the point rather than a tidiness, and it is the same one
+    `check_quality_claims.py` made for the same reason: every assertion above is
+    wired together here and nowhere else, so a wiring line deleted here disables
+    it while the assertion — and every self-test case that calls it directly —
+    stays green. While `main` was excluded from the sweep by name, five of the
+    six lines now below were deletable one at a time with every Python gate at
+    exit 0, `if problems:` among them, which reduced this to something that
+    printed `ok:` over a list of survivors.
+    """
+    if os.environ.get(SWEEP_MARKER):
+        print(
+            f"refusing to run the live sweep: {SWEEP_MARKER} says this process is already inside "
+            f"a sweep. Reaching here from a `--self-test` means the dispatch in `main` is not "
+            f"doing its job, and sweeping from here sweeps the file the outer sweep is mutating",
+            file=sys.stderr,
+        )
+        return 2
+
+    problems: list[str] = []
+    counts = []
+    for target in targets:
+        found, green, tried = problems_for(root, target)
+        problems += found
+        counts.append((target.script, tried, green))
+
+    if problems:
+        print("FAIL: a check in this tree can be neutered and stay green:", file=sys.stderr)
+        for problem in problems:
+            print(f"       {problem}", file=sys.stderr)
+        return 1
+
+    for script, tried, green in counts:
+        print(
+            f"ok: {script} — {tried} branches neutered one at a time, {tried - green} noticed by "
+            f"the script's own commands and {green} recorded in `allowed` with a reason"
+        )
+    return 0
 
 
 #: A script carrying one driven and one undriven site of each kind this sweep
@@ -336,19 +508,56 @@ VICTIM_UNDRIVEN = ('"undriven-if" in text', "UNDRIVEN_WORDS", "undriven_call(tex
 VICTIM_TARGET = Target(
     script="victim.py",
     commands=(("python3", "victim.py", "--self-test"), ("python3", "victim.py")),
-    not_swept=("self_test", "main"),
+    not_swept=(
+        Unswept("self_test", "the victim's harness, which is what `not_swept` is for"),
+        Unswept("main", "argv dispatch, which no self-test of the victim's can prove it reached"),
+    ),
     allowed=(),
 )
 
+#: `VICTIM_TARGET` with its three undriven sites permitted, so a sweep over the
+#: victim has nothing to report. Both the process cases that need a clean tree
+#: use it.
+PERMITTED_TARGET = dataclasses.replace(
+    VICTIM_TARGET,
+    allowed=tuple(
+        Allowed("problems_in", source, "on purpose") for source in VICTIM_UNDRIVEN
+    ),
+)
 
-def with_allowed(allowed: tuple[Allowed, ...]) -> Target:
-    """`VICTIM_TARGET` with a different exception list."""
-    return Target(
-        script=VICTIM_TARGET.script,
-        commands=VICTIM_TARGET.commands,
-        not_swept=VICTIM_TARGET.not_swept,
-        allowed=allowed,
-    )
+
+def staged_sweep(
+    victim: str, target: Target, environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """This file, run as a process over a tree staged in a temporary directory.
+
+    Everything `self_test` does above calls `sites` and `problems_for` directly,
+    which leaves `run` — and `main`'s dispatch to it, the two lines CI actually
+    invokes — with nothing behind them. The file is copied in under a name no
+    target claims, so its own `REPO_ROOT` resolves to the staged tree while the
+    staged sweep still has only the victim to sweep. SWEEP_MARKER is stripped
+    from the child's environment unless a case sets it: when the real sweep runs
+    this file's `--self-test` the marker is already set, and inheriting it would
+    make every case here refuse.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        entry = root / "scripts" / "sweep.py"
+        entry.parent.mkdir()
+        shutil.copy(pathlib.Path(__file__).resolve(), entry)
+        (root / target.script).write_text(victim)
+        described = root / "targets.json"
+        described.write_text(json.dumps([dataclasses.asdict(target)]))
+        env = {name: value for name, value in os.environ.items() if name != SWEEP_MARKER}
+        env.update(environment or {})
+        return subprocess.run(
+            [sys.executable, str(entry), "--targets", str(described)],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=TIMEOUT_SECONDS,
+            env=env,
+        )
 
 
 def self_test() -> int:
@@ -357,7 +566,7 @@ def self_test() -> int:
         root = pathlib.Path(directory)
         (root / "victim.py").write_text(VICTIM)
 
-        found = tuple(site.source for site in sites(VICTIM, VICTIM_TARGET.not_swept))
+        found = tuple(site.source for site in sites(VICTIM, VICTIM_TARGET.unswept()))
         if found != VICTIM_SITES:
             print(
                 f"self-test FAILED: the enumerated sites were {list(found)} and the victim "
@@ -397,9 +606,7 @@ def self_test() -> int:
             return 1
 
         # The exception mechanism, and both ways an exception goes stale.
-        permitted = with_allowed(
-            tuple(Allowed("problems_in", source, "on purpose") for source in VICTIM_UNDRIVEN)
-        )
+        permitted = PERMITTED_TARGET
         if problems_for(root, permitted)[0] != []:
             print(
                 f"self-test FAILED: permitted survivors were still reported: "
@@ -408,7 +615,9 @@ def self_test() -> int:
             )
             return 1
 
-        needless = with_allowed((Allowed("problems_in", '"driven-if" in text', "not needed"),))
+        needless = dataclasses.replace(
+            VICTIM_TARGET, allowed=(Allowed("problems_in", '"driven-if" in text', "not needed"),)
+        )
         if not any("is now noticed" in problem for problem in problems_for(root, needless)[0]):
             print(
                 f"self-test FAILED: an allowance for a branch that IS noticed was not reported: "
@@ -417,7 +626,9 @@ def self_test() -> int:
             )
             return 1
 
-        moved = with_allowed((Allowed("problems_in", '"deleted" in text', "gone"),))
+        moved = dataclasses.replace(
+            VICTIM_TARGET, allowed=(Allowed("problems_in", '"deleted" in text', "gone"),)
+        )
         if not any("no such branch" in problem for problem in problems_for(root, moved)[0]):
             print(
                 f"self-test FAILED: an allowance naming a branch that does not exist was not "
@@ -426,13 +637,78 @@ def self_test() -> int:
             )
             return 1
 
+        # And the other escape hatch going stale the same way. `not_swept` used
+        # to be bare names with no reason and no check, which is how `main` sat
+        # in this file's own entry excluding five sites nobody had looked at.
+        renamed = dataclasses.replace(
+            permitted,
+            not_swept=permitted.not_swept + (Unswept("problems_in_v2", "renamed away"),),
+        )
+        if not any("no such function" in problem for problem in problems_for(root, renamed)[0]):
+            print(
+                f"self-test FAILED: `not_swept` naming a function that does not exist was not "
+                f"reported: {problems_for(root, renamed)[0]}",
+                file=sys.stderr,
+            )
+            return 1
+
+    # `run`, and `main`'s dispatch to it, driven end to end as a process. Every
+    # case above calls the pieces directly and leaves the lines that wire them
+    # together untested, which is exactly what `main` being excluded by name had
+    # hidden. These three are what those lines redden.
+    broken = staged_sweep(VICTIM, VICTIM_TARGET)
+    if broken.returncode != 1:
+        print(
+            f"self-test FAILED: swept as a process, a victim with undriven sites in it left the "
+            f"entry point at {broken.returncode} rather than 1. That is the loop over the "
+            f"targets, the accumulation into `problems` and `if problems:` — the wiring, not the "
+            f"assertions: {broken.stdout}{broken.stderr}",
+            file=sys.stderr,
+        )
+        return 1
+    for source in VICTIM_UNDRIVEN:
+        if source not in broken.stderr:
+            print(
+                f"self-test FAILED: swept as a process, the entry point exited 1 without naming "
+                f"`{source}` in what it printed. An exit code with no report behind it does not "
+                f"say which line survived: {broken.stdout}{broken.stderr}",
+                file=sys.stderr,
+            )
+            return 1
+
+    clean = staged_sweep(VICTIM, PERMITTED_TARGET)
+    if clean.returncode != 0 or f"ok: {VICTIM_TARGET.script} —" not in clean.stdout:
+        print(
+            f"self-test FAILED: swept as a process, a victim with every survivor permitted left "
+            f"the entry point at {clean.returncode} and printed {clean.stdout!r}. It should exit "
+            f"0 with one `ok:` line naming each target: {clean.stderr}",
+            file=sys.stderr,
+        )
+        return 1
+
+    nested = staged_sweep(VICTIM, PERMITTED_TARGET, {SWEEP_MARKER: "1"})
+    if nested.returncode != 2 or "already inside a sweep" not in nested.stderr:
+        print(
+            f"self-test FAILED: reached from inside a sweep the entry point returned "
+            f"{nested.returncode} and said {nested.stderr!r}, rather than refusing. Without that "
+            f"refusal, neutering `args.self_test` turns every `--self-test` this sweep runs "
+            f"against itself into another live sweep of this file: measured, that recursed until "
+            f"the outer command hit TIMEOUT_SECONDS, and the orphaned processes were still "
+            f"rewriting the file seconds after the sweep had restored it",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"self-test ok: over a staged script carrying a driven and an undriven `if`, `for` and "
         f"`problems +=`, the sweep enumerates all {len(VICTIM_SITES)} in source order, reports "
         f"the {len(VICTIM_UNDRIVEN)} undriven ones and no other, puts the file back, reports "
         f"nothing once they are permitted, and reports a permission both when the branch it "
-        f"names is noticed after all and when the branch is gone; {len(TARGETS)} scripts are "
-        f"swept for real"
+        f"names is noticed after all and when the branch is gone, and a `not_swept` entry naming "
+        f"a function the file does not define; and with this file run as a process over a staged "
+        f"tree, `run` reports every undriven site and exits 1, exits 0 with an `ok:` line per "
+        f"target once they are permitted, and refuses with 2 when it is reached from inside a "
+        f"sweep; {len(TARGETS)} scripts are swept for real"
     )
     return 0
 
@@ -440,30 +716,19 @@ def self_test() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--targets",
+        metavar="JSON",
+        help="sweep the targets this JSON file describes instead of TARGETS. Only --self-test "
+        "passes it, to drive this entry point over a tree it staged",
+    )
     args = parser.parse_args()
 
     if args.self_test:
         return self_test()
-
-    problems: list[str] = []
-    counts = []
-    for target in TARGETS:
-        found, green, tried = problems_for(REPO_ROOT, target)
-        problems += found
-        counts.append((target.script, tried, green))
-
-    if problems:
-        print("FAIL: a check in this tree can be neutered and stay green:", file=sys.stderr)
-        for problem in problems:
-            print(f"       {problem}", file=sys.stderr)
-        return 1
-
-    for script, tried, green in counts:
-        print(
-            f"ok: {script} — {tried} branches neutered one at a time, {tried - green} noticed by "
-            f"the script's own commands and {green} recorded in `allowed` with a reason"
-        )
-    return 0
+    if args.targets:
+        return run(REPO_ROOT, targets_from(pathlib.Path(args.targets)))
+    return run(REPO_ROOT, TARGETS)
 
 
 if __name__ == "__main__":
