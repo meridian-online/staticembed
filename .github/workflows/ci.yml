@@ -140,6 +140,17 @@ jobs:
       - name: The mutation table still points at code that exists
         run: python3 scripts/mutation_check.py --check-anchors
 
+      # And the checks themselves: neuter one branch of a checked script at a
+      # time and require the script to come back non-zero. This runs here rather
+      # than staying local because it needs no build and no duckdb, and the
+      # whole sweep is under a minute. It is what catches an assertion that can
+      # be deleted with every gate green, which until now was found only by
+      # somebody reading the file.
+      - name: Every assertion in the checked scripts can fail
+        run: |
+          python3 scripts/check_assertions_can_fail.py --self-test
+          python3 scripts/check_assertions_can_fail.py
+
       - name: Report the artifact size
         run: ls -l build/staticembed.duckdb_extension
 

@@ -31,12 +31,12 @@ DUCKDB_PLATFORM ?= $(if $(CLI_PLATFORM),$(CLI_PLATFORM),$(UNAME_PLATFORM))
 BUILD_DIR := build
 EXTENSION := $(BUILD_DIR)/$(EXTENSION_NAME).duckdb_extension
 
-.PHONY: all check build extension test test-sql description-examples no-network documented-surface quality-claims mutation-check fmt clippy clean
+.PHONY: all check build extension test test-sql description-examples no-network documented-surface quality-claims assertions-can-fail mutation-check fmt clippy clean
 
 all: extension
 
 ## Everything CI runs, in the order it runs it.
-check: fmt clippy test extension no-network documented-surface test-sql description-examples quality-claims
+check: fmt clippy test extension no-network documented-surface test-sql description-examples quality-claims assertions-can-fail
 
 build:
 	cargo build --workspace --release
@@ -95,6 +95,15 @@ description-examples: extension
 quality-claims:
 	python3 scripts/check_quality_claims.py --self-test
 	python3 scripts/check_quality_claims.py
+
+## Neuter one branch of a checked script at a time and require the script to
+## notice. This one IS part of `check` and IS in CI: it needs no build and no
+## duckdb, and the whole sweep is seconds. Every review of check_quality_claims.py
+## so far has found an assertion that could be deleted with every gate green, and
+## every one was found by a person reading the file rather than by a check.
+assertions-can-fail:
+	python3 scripts/check_assertions_can_fail.py --self-test
+	python3 scripts/check_assertions_can_fail.py
 
 ## Break the code on purpose and require the named test to redden. NOT part of
 ## `check`: every SQL mutation rebuilds the release cdylib, so a sweep is

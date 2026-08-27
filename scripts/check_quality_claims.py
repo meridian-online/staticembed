@@ -927,7 +927,8 @@ def stage_tree(root: pathlib.Path, tree: dict[str, str]) -> None:
     """
     import yaml
 
-    (root / README).write_text(tree["readme"])
+    if tree["readme"] is not None:
+        (root / README).write_text(tree["readme"])
     source = root / MODEL_SOURCE
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(f"Revision: `{tree['revision']}`\n")
@@ -945,13 +946,24 @@ def stage_tree(root: pathlib.Path, tree: dict[str, str]) -> None:
 
 
 def staged_run(tree: dict[str, str]) -> tuple[int, str]:
-    """`run` over a staged tree, as (exit code, everything it printed)."""
+    """`run` over a staged tree, as (exit code, everything it printed).
+
+    A raise is reported as exit -1 and the exception in the text, rather than
+    being allowed to leave `self_test` as a traceback. A check that raises has
+    judged nothing, and a case whose only way of failing is somebody else's
+    stack trace is a case that reports somebody else's message: two cases below
+    plant a tree that raises rather than reports when the guard they name is
+    removed, and this is what lets each of them say so itself.
+    """
     with tempfile.TemporaryDirectory() as directory:
         root = pathlib.Path(directory)
         stage_tree(root, tree)
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = run(root)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = run(root)
+        except Exception as raised:  # noqa: BLE001
+            return -1, f"{out.getvalue()}{err.getvalue()}run() raised {raised!r}"
         return code, out.getvalue() + err.getvalue()
 
 
@@ -1109,6 +1121,24 @@ def self_test() -> int:  # noqa: C901
         "| nearest neighbours that survive | 13% | 28% | 40% |\n"
         "| region structure kept | 71% | 67% | 88% |\n"
     )
+    # What `table` counts as a row. Neither line below is one, and each is a
+    # line the real pages carry: prose with a pipe in it, and the separator
+    # under the header.
+    with_a_pipe = "a sentence with | a pipe in it\n| rows | 3,000 | 3,000 | 216 |\n"
+    if table(with_a_pipe) != [["rows", "3,000", "3,000", "216"]]:
+        print(
+            f"self-test FAILED: a prose line carrying a pipe was read as a table row: "
+            f"{table(with_a_pipe)}",
+            file=sys.stderr,
+        )
+        return 1
+    if ["---", "---", "---", "---"] in table(good_table):
+        print(
+            f"self-test FAILED: the separator under the header was read as a row of cells: "
+            f"{table(good_table)}",
+            file=sys.stderr,
+        )
+        return 1
     if table_problems("a_file", good_table) != []:
         print(
             f"self-test FAILED: a correct summary table was reported: "
@@ -1152,6 +1182,19 @@ def self_test() -> int:  # noqa: C901
                 "| rows | 3,000 | 3,000 | 216 |", "| rows | 3,000 | | 216 |"
             ),
             "needs exactly one",
+        ),
+        # A column deleted from one row, which the emptied-cell case above
+        # cannot stand in for: that one keeps three cells and this one has two.
+        # `zip(CORPORA, cells)` truncates to the shorter of the two, so without
+        # the width check the surviving cells are read against the corpora they
+        # no longer sit under and the row is reported clean.
+        (
+            "a row with one of the three corpus columns deleted",
+            good_table.replace(
+                "| region structure kept | 71% | 67% | 88% |",
+                "| region structure kept | 71% | 67% |",
+            ),
+            "2 cells under 3 corpora",
         ),
         ("no table at all", "prose with no table in it", "no single summary table"),
     ):
@@ -1336,6 +1379,19 @@ def self_test() -> int:  # noqa: C901
             good + " Every figure below compares the bundled model against MiniLM.",
             "'every'",
         ),
+        # Assertion 6 reached through `region_problems` rather than called
+        # directly. The endpoints cases above drive `series_problems` and say
+        # nothing about whether anything calls it: `problems +=
+        # series_problems(...)` could be deleted with every case here green,
+        # and a sentence quoting two of the three region figures would then
+        # ship on both pages. Appended rather than substituted so that no pin
+        # in CLAIMS breaks, and the two figures are registered, so this is the
+        # only assertion with anything to say about it.
+        (
+            "a partial series reached through region_problems",
+            good + " Region structure is 71% on long-form prose and 88% on very short strings.",
+            "2 of the 3 region retention figures",
+        ),
     ):
         found = region_problems("a_file", text)
         if needle is None:
@@ -1397,12 +1453,38 @@ def self_test() -> int:  # noqa: C901
     if disagreements("13% and 28%", "13% and 28%") != []:
         print("self-test FAILED: two agreeing sections were reported", file=sys.stderr)
         return 1
+    # A section that could not be found is reported by `region_problems` as
+    # missing, and comparing it against the other one would report the whole of
+    # the other one as one-sided on top of that. Both directions, because the
+    # guard is one condition covering two.
+    for absent in ((None, "13%"), ("13%", None)):
+        try:
+            compared = disagreements(*absent)
+        except Exception as raised:  # noqa: BLE001
+            compared = [f"it raised {raised!r}"]
+        if compared != []:
+            print(
+                f"self-test FAILED: a missing section was compared against a present one: "
+                f"{compared}",
+                file=sys.stderr,
+            )
+            return 1
     both_ways = disagreements("13% and 28%", "13%") + disagreements("13%", "13% and 28%")
     if len(both_ways) != 2:
         print(f"self-test FAILED: a one-sided figure gave {both_ways}", file=sys.stderr)
         return 1
     if disagreements("the overlap is 13%", "the overlap is 14%") == []:
         print("self-test FAILED: two sections disagreeing on a figure were not", file=sys.stderr)
+        return 1
+    # A count mismatch is reported as a count mismatch and not also as an
+    # ordering one: `13% 28%` against `28%` differs in both, and reporting one
+    # defect in two vocabularies sends a reader looking for a second edit.
+    if len(disagreements("13% and 28%", "28%")) != 1:
+        print(
+            f"self-test FAILED: a one-sided figure was reported as a count mismatch and as an "
+            f"ordering mismatch: {disagreements('13% and 28%', '28%')}",
+            file=sys.stderr,
+        )
         return 1
     if disagreements("13% then 28%", "28% then 13%") == []:
         print(
@@ -1498,6 +1580,32 @@ def self_test() -> int:  # noqa: C901
         )
         return 1
 
+    # The two ways the tree is not readable at all, before the defects in it.
+    # Both are reported rather than raised, and neither is exit 1: a tree this
+    # cannot read is not a tree it has judged.
+    for label, override, expected, needle in (
+        ("one of the three files missing", {"readme": None}, 2, "is not in the tree"),
+        (
+            "a descriptor with an empty body",
+            {"extended": ""},
+            1,
+            "has no docs.extended_description",
+        ),
+    ):
+        code, report = staged_run({**clean_tree, **override})
+        if code != expected:
+            print(
+                f"self-test FAILED: {label} — exited {code} rather than {expected}: {report}",
+                file=sys.stderr,
+            )
+            return 1
+        if needle not in report:
+            print(
+                f"self-test FAILED: {label} — nothing it reported carried {needle!r}: {report}",
+                file=sys.stderr,
+            )
+            return 1
+
     hedged = good + " a minority survive.\n"
     a_whole_series = (
         good
@@ -1547,9 +1655,10 @@ def self_test() -> int:  # noqa: C901
         ),
         # The two fields assertion 8 could not see. `docs.hello_world` is the
         # worked example the registry renders above the body, and it is raw SQL
-        # rather than a fenced block: a rows-per-second comment in it published
-        # exactly the claim AC6 excludes, under a check printing that there was
-        # no speed vocabulary anywhere on the page.
+        # rather than a fenced block: a rows-per-second comment in it puts the
+        # embedding-only speed figure into the entry's own worked example, which
+        # is the number this page leaves out on purpose, under a check printing
+        # that there was no speed vocabulary anywhere on it.
         (
             "a speed figure in the registry entry's published SQL example",
             {
@@ -1629,8 +1738,12 @@ def self_test() -> int:  # noqa: C901
         f"temporary directory the whole of `run` reports a hedge on either page alone, a figure "
         f"on one page alone, a figure and a permitted universal neither page writes, a speed "
         f"figure below the quality section, in the registry entry's published SQL example and "
-        f"in its one-line blurb, and a bumped revision — with this file run as a process for "
-        f"`main`'s own dispatch to it"
+        f"in its one-line blurb, a file missing from the tree and a descriptor with an empty "
+        f"body — with this file run as a process for `main`'s own dispatch to it; and a table "
+        f"row with a corpus column deleted, a partial series reached through `region_problems` "
+        f"rather than called directly, a prose line carrying a pipe and a separator row not "
+        f"read as table rows, a missing section not compared against a present one, and a "
+        f"count mismatch reported once rather than as an ordering mismatch as well"
     )
     return 0
 
