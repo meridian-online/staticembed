@@ -148,9 +148,13 @@ jobs:
       # target does not exclude — this script's own `main` among them, which was
       # excluded by name until the sweep was pointed at it and reported five of
       # its six sites deletable with every Python gate at exit 0. What it does
-      # not reach is list content: an entry dropped from CLAIMS, PAGE_FIELDS or
-      # BANNED_ON_PAGE is not a branch. The script's docstring names which of
-      # those are open and hands them to scripts/mutation_check.py.
+      # not reach is list content: an entry dropped from CLAIMS, PAGE_FIELDS,
+      # BANNED_ON_PAGE or BANNED_IN_SECTION is not a branch. The script's
+      # docstring names which of those are open and hands them to
+      # scripts/mutation_check.py. Nor does it reach the marker that stops the
+      # sweep re-entering itself or the group kill that bounds a hang: both are
+      # expressions rather than branches, and the --self-test command in this
+      # step is the only thing that reddens for either.
       - name: The branches this sweep enumerates redden when neutered
         run: |
           python3 scripts/check_assertions_can_fail.py --self-test

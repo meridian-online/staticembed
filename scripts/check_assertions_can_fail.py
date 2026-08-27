@@ -56,19 +56,22 @@ WHAT IT DOES NOT DO
     hand-written table in `scripts/mutation_check.py` is where a breakage of
     that shape goes.
 
-    It does not measure list content. `CLAIMS`, `PAGE_FIELDS` and
-    `BANNED_ON_PAGE` in `check_quality_claims.py` are lists an assertion reads
-    rather than branches, so an entry deleted from one is invisible here.
-    Entries in all three are invisible to that file's own self-test too, which
-    is a live hole and not a limitation of this sweep: `CLAIMS` builds the
-    fixture its cases run against — `good = " ".join(CLAIMS)` — so an entry
-    witnesses itself and nothing else does, and dropping one stops it pinning
-    the published sentence it was written for; `PAGE_FIELDS` losing
-    `("docs", "extended_description")` goes unreported; and `throughput` and
-    `rows/s` in `BANNED_ON_PAGE` have no case that they alone satisfy, so
-    dropping `throughput` would let a throughput claim ship as the opening line
-    of the registry entry. Measured on this tree, and left open. The
-    hand-written table in `scripts/mutation_check.py` is where a breakage of
+    It does not measure list content. `CLAIMS`, `PAGE_FIELDS`,
+    `BANNED_ON_PAGE` and `BANNED_IN_SECTION` in `check_quality_claims.py` are
+    lists an assertion reads rather than branches, so an entry deleted from one
+    is invisible here. Each of those four has entries its own file's self-test
+    does not see either, which is a live hole and not a limitation of this
+    sweep: `CLAIMS` builds the fixture its cases run against —
+    `good = " ".join(CLAIMS)` — so an entry witnesses itself and nothing else
+    does, and dropping one stops it pinning the published sentence it was
+    written for; `PAGE_FIELDS` losing `("docs", "extended_description")` goes
+    unreported; `throughput` and `rows/s` in `BANNED_ON_PAGE` have no case that
+    they alone satisfy, so dropping `throughput` would let a throughput claim
+    ship as the opening line of the registry entry; and of `BANNED_IN_SECTION`'s
+    four hedges, `most of the cluster` and `on the evidence we have` are each
+    deletable with both of that file's commands at exit 0, which lets back in
+    the hedge a measured figure replaced. Measured on this tree, and left open.
+    The hand-written table in `scripts/mutation_check.py` is where a breakage of
     that shape goes.
 
     It does not say the assertions are the right ones. A check that asserts
@@ -97,6 +100,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -104,6 +108,22 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 #: Long enough that a slow machine is not a failure, short enough that a neuter
 #: which turns a loop infinite does not hold a CI runner for an hour.
 TIMEOUT_SECONDS = 120
+
+#: The timeout the group-kill case in `self_test` runs `reddened` with, instead
+#: of TIMEOUT_SECONDS: that case has to reach the timeout path to reach the kill,
+#: and waiting two minutes for it once per swept site is not affordable. Two
+#: interpreters have to start inside it, so a run slow enough to miss that fails
+#: saying the child never started rather than passing on nothing.
+KILL_TIMEOUT_SECONDS = 3.0
+
+#: How long that case then watches the heartbeat for. Six writes at the interval
+#: `HEARTBEAT` uses.
+HEARTBEAT_WINDOW_SECONDS = 0.3
+
+#: And how long the heartbeat runs for at the outside. Bounded so that a tree
+#: where the group kill has been broken leaks one process for seconds rather
+#: than until the machine is rebooted.
+HEARTBEAT_SECONDS = 10
 
 #: Set in the environment of every command the sweep runs, and refused by `run`.
 #: Without it, neutering `main`'s dispatch to `self_test` turns the `--self-test`
@@ -281,19 +301,39 @@ def sites(source: str, not_swept: tuple[str, ...]) -> list[Site]:
     return found
 
 
-def reddened(root: pathlib.Path, commands: tuple[tuple[str, ...], ...]) -> bool:
+def reddened(
+    root: pathlib.Path,
+    commands: tuple[tuple[str, ...], ...],
+    timeout: float = TIMEOUT_SECONDS,
+) -> bool:
     """Whether any command comes back non-zero. A command that hangs counts as noticing.
 
     SWEEP_MARKER goes into every child's environment so that a command which
     reaches the live sweep — which is what a neutered `--self-test` dispatch
     does — refuses instead of sweeping the tree that is already being swept.
+    That marker is what bounds the recursion, and the kill below does not help
+    with it and cannot. Each child is given a session of its own, so a nested
+    sweep's own children land in a group of their own; killing the group named
+    by `child.pid` reaches one level and every level under it goes on running.
+    Measured with the group kill in place and the marker removed: twenty-three
+    orphans in twenty-three distinct process groups outlived the timeout and
+    were still multiplying twenty seconds after it, and the swept file, which
+    `survivors`' own `finally` had put back, was intact a second later and
+    gutted four seconds later.
 
-    The child gets its own session so that a hang can be killed as a group.
-    `subprocess.run(timeout=...)` kills the process it started and nothing
-    beneath it: measured on a command that had been neutered into recursing,
-    twenty-three orphans outlived the timeout and were still rewriting the
-    swept file four seconds after `survivors`' own `finally` had put it back.
-    A sweep that can leave the tree it swept modified is worse than no sweep.
+    What the group kill does bound is a leaf hang — a command that stops
+    responding having spawned children that stay in its group.
+    `subprocess.run(timeout=...)` kills the process it started and leaves those
+    running; killing the group takes them with it. A sweep that can leave the
+    tree it swept modified is worse than no sweep.
+
+    Neither the marker nor the kill is a branch, so the sweep does not enumerate
+    either and removing one is invisible to it. The last two cases in
+    `self_test` drive them, and are what reddens: measured with each removed on
+    its own, every other Python gate in this repo stayed at exit 0.
+
+    `timeout` is a parameter for that self-test alone: the group-kill case has
+    to reach the timeout path, and nothing else passes it.
     """
     environment = {**os.environ, SWEEP_MARKER: "1"}
     for command in commands:
@@ -308,7 +348,7 @@ def reddened(root: pathlib.Path, commands: tuple[tuple[str, ...], ...]) -> bool:
             start_new_session=True,
         )
         try:
-            child.communicate(timeout=TIMEOUT_SECONDS)
+            child.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             os.killpg(os.getpgid(child.pid), signal.SIGKILL)
             child.communicate()
@@ -526,6 +566,60 @@ PERMITTED_TARGET = dataclasses.replace(
 )
 
 
+#: A command for `reddened` that spawns a child of its own and then stops
+#: responding, so the timeout path runs with something still underneath it. The
+#: child stays in the parent's process group — no `start_new_session` — because
+#: that group is what the kill names. Its output goes to DEVNULL rather than to
+#: the pipes `reddened` opens: a child holding those open makes
+#: `child.communicate()` wait for it, and a survivor waited for is a survivor
+#: that has finished writing by the time anything looks.
+SPAWNS_AND_HANGS = """\
+import subprocess
+import sys
+import time
+
+subprocess.Popen(
+    [sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+time.sleep(3600)
+"""
+
+#: What that child runs: a byte appended every 50ms, for at most the seconds it
+#: is handed. A file that stops growing is a process that stopped.
+HEARTBEAT = """\
+import sys
+import time
+
+path, deadline = sys.argv[1], time.time() + float(sys.argv[2])
+while time.time() < deadline:
+    with open(path, "a") as beat:
+        beat.write(".")
+    time.sleep(0.05)
+"""
+
+
+def stage_entry(
+    root: pathlib.Path, victim: str, target: Target
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Copy this file into `root` as a sweep of `target` alone; return entry and targets.
+
+    The file is copied in under a name no target claims, so its own `REPO_ROOT`
+    resolves to the staged tree while the staged sweep still has only the victim
+    to sweep. Split out because two cases need the tree: `staged_sweep` runs the
+    entry point over it, and the re-entry case hands the same command to
+    `reddened` instead, which is where SWEEP_MARKER is put into the environment.
+    """
+    entry = root / "scripts" / "sweep.py"
+    entry.parent.mkdir()
+    shutil.copy(pathlib.Path(__file__).resolve(), entry)
+    (root / target.script).write_text(victim)
+    described = root / "targets.json"
+    described.write_text(json.dumps([dataclasses.asdict(target)]))
+    return entry, described
+
+
 def staged_sweep(
     victim: str, target: Target, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -542,12 +636,7 @@ def staged_sweep(
     """
     with tempfile.TemporaryDirectory() as directory:
         root = pathlib.Path(directory)
-        entry = root / "scripts" / "sweep.py"
-        entry.parent.mkdir()
-        shutil.copy(pathlib.Path(__file__).resolve(), entry)
-        (root / target.script).write_text(victim)
-        described = root / "targets.json"
-        described.write_text(json.dumps([dataclasses.asdict(target)]))
+        entry, described = stage_entry(root, victim, target)
         env = {name: value for name, value in os.environ.items() if name != SWEEP_MARKER}
         env.update(environment or {})
         return subprocess.run(
@@ -699,6 +788,79 @@ def self_test() -> int:
         )
         return 1
 
+    # `reddened`'s end of the marker, which no case above reaches. Each of them
+    # either sets SWEEP_MARKER itself or strips it, and none asks whether
+    # `reddened` is what puts it there. Measured: replacing that environment
+    # with a bare `dict(os.environ)` and leaving everything else alone left
+    # every Python gate in this repo at exit 0 — including the live sweep, which
+    # printed its usual `ok:` line — while twenty-three orphans in twenty-three
+    # distinct process groups sat under it, still multiplying twenty seconds
+    # later, and both checked scripts were left gutted on disk.
+    #
+    # The command below re-enters this entry point over a staged tree. With the
+    # marker delivered, `run` refuses in milliseconds and `reddened` reads a
+    # non-zero exit. Without it the staged sweep runs for real over a victim
+    # that has nothing to report and comes back 0, so this fails rather than
+    # recursing — and the `clean` case above is the control for that half,
+    # being the same file, victim and target run as a process with the marker
+    # stripped, required to exit 0.
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        entry, described = stage_entry(root, VICTIM, PERMITTED_TARGET)
+        reentry = (sys.executable, str(entry), "--targets", str(described))
+        if not reddened(root, (reentry,)):
+            print(
+                f"self-test FAILED: a command that re-enters this entry point came back 0 "
+                f"through `reddened`, so {SWEEP_MARKER} never reached the child's environment "
+                f"and the sweep it re-entered ran instead of refusing. That marker is what "
+                f"bounds a neutered `args.self_test` dispatch: without it every `--self-test` "
+                f"the sweep runs against this file becomes another live sweep of it, and the "
+                f"group kill reaches one level of that",
+                file=sys.stderr,
+            )
+            return 1
+
+    # The group kill, which no case above reaches either: replacing
+    # `os.killpg(...)` with `child.kill()` left every Python gate at exit 0 too.
+    # The victim spawns a child of its own into the same process group and then
+    # stops responding, so the timeout path runs; afterwards the heartbeat that
+    # child was writing has to have stopped. `subprocess.run(timeout=...)` kills
+    # the process it started and leaves that child running, which is the shape
+    # of what went on rewriting a tracked file after the sweep had restored it.
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        beat = root / "heartbeat"
+        hangs = ("python3", "-c", SPAWNS_AND_HANGS, HEARTBEAT, str(beat), str(HEARTBEAT_SECONDS))
+        if not reddened(root, (hangs,), timeout=KILL_TIMEOUT_SECONDS):
+            print(
+                "self-test FAILED: a command that never exits came back green. A hang has to "
+                "count as noticing, or a neuter that turns a loop infinite reads as a check "
+                "that passed",
+                file=sys.stderr,
+            )
+            return 1
+        if not beat.exists():
+            print(
+                f"self-test FAILED: the hanging command's own child never wrote {beat.name}, so "
+                f"the kill was measured against nothing running and this case could not have "
+                f"failed. It has KILL_TIMEOUT_SECONDS ({KILL_TIMEOUT_SECONDS}s) to start two "
+                f"interpreters",
+                file=sys.stderr,
+            )
+            return 1
+        written = beat.stat().st_size
+        time.sleep(HEARTBEAT_WINDOW_SECONDS)
+        if beat.stat().st_size != written:
+            print(
+                f"self-test FAILED: a process below the timed-out command was still writing "
+                f"{HEARTBEAT_WINDOW_SECONDS}s after it was killed. The kill has to name the "
+                f"process group: `subprocess.run(timeout=...)` kills the process it started and "
+                f"nothing beneath it, and what survives that is what went on rewriting a "
+                f"tracked file four seconds after this sweep had put it back",
+                file=sys.stderr,
+            )
+            return 1
+
     print(
         f"self-test ok: over a staged script carrying a driven and an undriven `if`, `for` and "
         f"`problems +=`, the sweep enumerates all {len(VICTIM_SITES)} in source order, reports "
@@ -708,7 +870,10 @@ def self_test() -> int:
         f"a function the file does not define; and with this file run as a process over a staged "
         f"tree, `run` reports every undriven site and exits 1, exits 0 with an `ok:` line per "
         f"target once they are permitted, and refuses with 2 when it is reached from inside a "
-        f"sweep; {len(TARGETS)} scripts are swept for real"
+        f"sweep. Through `reddened`: a command that re-enters that entry point is refused "
+        f"rather than sweeping, which is what says {SWEEP_MARKER} is delivered, and a command "
+        f"that hangs having spawned a child of its own leaves nothing of it writing "
+        f"{HEARTBEAT_WINDOW_SECONDS}s later. {len(TARGETS)} scripts are swept for real"
     )
     return 0
 
