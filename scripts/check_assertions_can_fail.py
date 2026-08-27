@@ -381,10 +381,10 @@ def problems_for(root: pathlib.Path, target: Target) -> tuple[list[str], int, in
 def targets_from(described: pathlib.Path) -> tuple[Target, ...]:
     """The targets a JSON file describes, instead of `TARGETS`.
 
-    Only `self_test` passes `--targets`. It is how a case drives this entry
+    `--targets` is passed by `self_test`, which is how a case drives this entry
     point end to end over a tree it staged, without the staged tree having to
     contain the real scripts `TARGETS` names — which is what would turn the
-    staged sweep back into a sweep of this file.
+    staged sweep back into a sweep of this file. Neither CI command passes it.
     """
     return tuple(
         Target(
@@ -719,8 +719,8 @@ def main() -> int:
     parser.add_argument(
         "--targets",
         metavar="JSON",
-        help="sweep the targets this JSON file describes instead of TARGETS. Only --self-test "
-        "passes it, to drive this entry point over a tree it staged",
+        help="sweep the targets this JSON file describes instead of TARGETS. Passed by "
+        "--self-test, to drive this entry point over a tree it staged",
     )
     args = parser.parse_args()
 
