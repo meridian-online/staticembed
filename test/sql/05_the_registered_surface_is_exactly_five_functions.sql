@@ -20,7 +20,8 @@ SELECT must('and they are exactly the documented five',
 
 -- No nearest-neighbour lookup, deliberately. The measured position of this
 -- model is that a map built from its vectors keeps the cluster structure and
--- loses the neighbourhoods, which README's "What it is not" states in full. A
+-- loses the neighbourhoods, which README's "What it is good at, and what it is
+-- not" states with the figures behind it. A
 -- function that invited "show me the rows most like this one" would promise
 -- what the model does not deliver, so the absence is asserted here rather than
 -- left to whoever adds the next function to remember.

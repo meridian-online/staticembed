@@ -19,7 +19,8 @@
 //! measured position of this model is that a map built from its vectors keeps
 //! the cluster structure and does not keep the neighbourhoods, so shipping a
 //! "rows most like this one" surface would promise something the model does not
-//! deliver. `README.md` says the same thing to the person reading the page.
+//! deliver. README.md and description.yml both say so to the person reading
+//! the page, under "What it is good at, and what it is not", with the figures.
 //!
 //! # NULL
 //!

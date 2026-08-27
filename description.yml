@@ -83,30 +83,105 @@ docs:
     filtered subset of a table can be embedded without materialising the rest,
     and it behaves the same over a local Parquet file as over a remote one.
 
-    ## What it is not
+    ## What it is good at, and what it is not
 
     **This is not a drop-in replacement for a hosted transformer, and the
-    difference is measured rather than hedged.** A static embedding has no
-    contextual attention. A two-dimensional map built from these vectors recovers
-    most of the cluster structure a hosted transformer recovers — the regions of
-    the map mean something. What it does not preserve is which specific rows sit
-    next to which: only a minority of any point's nearest neighbours survive the
-    swap.
+    difference is measured rather than hedged.** A static embedding is the mean
+    of its token vectors with no contextual attention, and what that costs is
+    specific rather than general. Our own figures come from the harness, corpora
+    and committed results in `eval/static-embedding-map-fidelity/` in
+    [meridian-online/finetype](https://github.com/meridian-online/finetype), and
+    where they compare, the comparison is the bundled `potion-base-8M` against
+    `all-MiniLM-L6-v2`. The figures that are not ours name whose they are, and
+    what they were measured against, in the sentence that carries them — a
+    different model, on a different benchmark.
 
-    It also does not read word order. A Model2Vec vector is the mean of its token
-    vectors, so `embed('valve bodies')` and `embed('bodies valve')` are the same
-    vector. Repetition does count — a word twice pulls the mean toward it — but
-    any phrase and its shuffle land in the same place.
+    **Two different questions live under "similarity", and this embedder answers
+    them differently.** *Pairwise judgement* asks how alike two given strings
+    are — is A a duplicate of B. *Ranked retrieval* asks a whole corpus for the
+    rows most like A. The neighbourhood figures under *What it is not for* are
+    ranked retrieval, and they are the weak result on this page; the
+    duplicate-detection figures under *What it is good at* are pairwise, and
+    they point the other way. Word-order blindness is a failure of both — a
+    phrase and its shuffle are false neighbours *and* a false duplicate.
+
+    ### What it is good at
+
+    **Pairwise similarity and duplicate scoring.**
+    [SwiftEmbed](https://arxiv.org/abs/2510.24793), built on this same
+    `potion-base-8M`, reports 90.1% average precision on SprintDuplicateQuestions
+    where Sentence-BERT reports 84.7% — ahead of it, not merely close — and 89%
+    to 100% of Sentence-BERT across its similarity and deduplication tasks. Those
+    are their published figures rather than our measurement.
+
+    **Coarse classification and tagging.** The same work puts classification at
+    about 75% of Sentence-BERT. On the shortest text we measured ourselves that
+    gap closes and reverses: over 216 column names in 12 semantic classes,
+    clustering the raw static vectors recovers more of the label structure than
+    clustering MiniLM's — 0.3924 against 0.3510 by adjusted mutual information.
+    Read that one as indicative rather than settled, because 216 rows is a small
+    sample; it is also the shape of text a database column usually holds.
+
+    **Reading a corpus as regions.** Project these vectors down to two dimensions
+    and the groups you see still line up with the corpus's own labels: 71% of
+    what MiniLM's map recovers on long-form prose, 67% on short text, 88% on very
+    short strings. That is measured against a random-vector control rather than
+    against nothing, so it is a share of the structure a real embedder finds and
+    a fake one does not.
+
+    ### What it is not for
+
+    **Ranked nearest-neighbour lookup — "show me the rows most like this one".**
+    Take a point's 20 nearest neighbours in a map built from these vectors, and
+    the same point's in a map built from MiniLM's: 13% are the same rows on
+    long-form prose, 28% on short text, 40% on very short strings. The regions
+    agree and the neighbourhoods do not. There is deliberately no similarity or
+    nearest-neighbour function in this extension, and this is the reason.
+
+    **And the neighbourhood penalty depends on the shape of your text, in the
+    opposite direction to the usual guess.** It is worst on long prose and
+    mildest on very short strings — 13%, then 28%, then 40% as the text gets
+    shorter. The more context a text carries, the more is lost by not attending
+    to it. So a column of names, codes or identifiers is at the good end for
+    neighbourhoods, and a column of paragraphs is at the bad end.
+
+    **Region structure does not run down the same line, and a one-line
+    description is the case to watch.** 71% on long-form prose, 67% on short
+    text, 88% on very short strings — short text is the weakest of the three for
+    regions, not the middle of them. A column of titles, subject lines or
+    one-line descriptions is therefore in the better half for neighbourhoods and
+    at the bottom for regions, so read the two rows of the table below as two
+    separate measurements rather than as one gradient.
+
+    | | long-form prose | short text | very short strings |
+    |---|---|---|---|
+    | corpus | 20 Newsgroups posts | their subject lines | column names |
+    | rows | 3,000 | 3,000 | 216 |
+    | nearest neighbours that survive | 13% | 28% | 40% |
+    | region structure kept | 71% | 67% | 88% |
+
+    **It also does not read word order.** A Model2Vec vector is the mean of its
+    token vectors, so `embed('valve bodies')` and `embed('bodies valve')` are
+    the same vector — a false duplicate, which is a pairwise failure and not a
+    ranked-retrieval one. Repetition does count — a word twice pulls the mean
+    toward it — but any phrase and its shuffle land in the same place.
 
     ```sql
     SELECT embed('valve bodies') = embed('bodies valve') AS order_is_ignored;
     ```
 
-    So this is built for looking at the shape of a corpus, and it is not built for
-    "show me the rows most like this one". There is deliberately no similarity or
-    nearest-neighbour function here. If nearest-neighbour lookup is what you need,
-    this is the wrong tool, and we would rather say so here than have you find out
-    from your results.
+    Our figures were measured with the harness in
+    `eval/static-embedding-map-fidelity/` against `potion-base-8M` as Hugging
+    Face served it at the time; that harness downloads the model by name and
+    records no revision, so the tie between these figures and the weights in
+    this binary is asserted here rather than recorded there. What is enforced is
+    narrower, and worth having: vectors from two model versions are not
+    comparable, so `scripts/check_quality_claims.py` reddens when the bundled
+    revision moves off the one in
+    [`models/potion-base-8M/SOURCE.md`](https://github.com/meridian-online/staticembed/blob/main/models/potion-base-8M/SOURCE.md)
+    that these figures were published against, which forces a re-run or a
+    deliberate re-blessing instead of a quiet drift. It holds this section and
+    the README's copy of it to the same figures at the same time.
 
     ## The SQL surface
 

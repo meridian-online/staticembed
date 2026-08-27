@@ -44,6 +44,11 @@ GLUE = "crates/staticembed-duckdb/src/lib.rs"
 #: mutation, so the next reader has to build one rather than find one.
 ARTIFACT = "build/staticembed.duckdb_extension"
 
+#: The doc checks below need no build and no duckdb: they read two files in the
+#: tree. Named here so a mutation of one cannot quietly point at the other.
+QUALITY_CLAIMS = ["python3", "scripts/check_quality_claims.py"]
+QUALITY_CLAIMS_SELF_TEST = [*QUALITY_CLAIMS, "--self-test"]
+
 
 @dataclass
 class Mutation:
@@ -577,6 +582,341 @@ MUTATIONS: list[Mutation] = [
         new="        signatures.append(sorted(field.split()[0] for field in fields))",
         kind="script",
         command=["python3", "scripts/check_documented_surface.py", "--self-test"],
+    ),
+    # ── the published quality position ───────────────────────────────────────
+    # README.md and description.yml both tell a stranger how good these vectors
+    # are, and description.yml is the copy that becomes the registry page.
+    # Neither can be settled by loading the extension, so the mutations below
+    # break the pages and the checker in turn. None of them touches Rust, so
+    # none rebuilds the cdylib.
+    Mutation(
+        name="the_readme_hedges_the_neighbourhood_figure",
+        file="README.md",
+        old="13% are the same rows on long-form prose",
+        new="only a minority are the same rows on long-form prose",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_registry_entry_drops_the_shape_dependence",
+        file="description.yml",
+        old="It is worst on long prose and\n    mildest on very short strings",
+        new="It is noticeable across the board and\n    much the same whatever the corpus",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_registry_entry_and_the_readme_disagree_on_a_figure",
+        file="description.yml",
+        old="| region structure kept | 71% | 67% | 88% |",
+        new="| region structure kept | 71% | 67% | 95% |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_published_figures_drift_from_the_measurement",
+        file="scripts/check_quality_claims.py",
+        old='        0.13185,\n        "kNN overlap with MiniLM\'s map, long-form prose",',
+        new='        0.20185,\n        "kNN overlap with MiniLM\'s map, long-form prose",',
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # And the checker going blind, measured through its own self-test.
+    Mutation(
+        name="the_quality_check_stops_comparing_the_two_pages",
+        file="scripts/check_quality_claims.py",
+        old="    for value in sorted((readme_counts - descriptor_counts).elements()):",
+        new="    for value in sorted([]):",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_rounding_at_the_written_precision",
+        file="scripts/check_quality_claims.py",
+        old="    return abs(figure.value - value) <= 0.5 * 10.0**-places + 1e-12",
+        new="    return abs(figure.value - value) <= 0.5",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_pinning_a_figure_to_its_corpus",
+        file="scripts/check_quality_claims.py",
+        old="    for claim in CLAIMS:",
+        new="    for claim in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The summary table restates the prose figures, and a literal string pin
+    # cannot tie a cell to the corpus it sits under: two cells swapped leave the
+    # set of quantities on the page unchanged. It is read cell by cell against
+    # FIGURES, by the row's series and the column's corpus, and these are the
+    # two edits that used to be invisible.
+    Mutation(
+        name="the_readme_swaps_two_summary_table_cells",
+        file="README.md",
+        old="| nearest neighbours that survive | 13% | 28% | 40% |",
+        new="| nearest neighbours that survive | 28% | 13% | 40% |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="the_readme_reverses_the_summary_table_header",
+        file="README.md",
+        old="| | long-form prose | short text | very short strings |",
+        new="| | very short strings | short text | long-form prose |",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # Region structure is 71%, 67%, 88% — not a gradient. A sentence quoting
+    # only its endpoints told a reader with one-line descriptions they were at
+    # the good end while the cited metric put them at the worst.
+    Mutation(
+        name="the_readme_states_a_direction_from_the_endpoints_only",
+        file="README.md",
+        old="mildest on very short strings — 13%, then 28%, then 40% as the text gets shorter.",
+        new="mildest on short strings — 13% against 40% on neighbours, 71% against 88% on regions.",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # The region sentence says 71% on long-form prose and 67% on short text, and
+    # the table two lines below says the same. Swapping which corpus each figure
+    # belongs to leaves the quantities, their count and their order untouched in
+    # both files, so assertions 2, 3, 5 and 6 all pass: what is left is a
+    # sentence contradicting its own table. Only the CLAIMS pin sees it, and
+    # until that pin existed this edit passed the whole check.
+    Mutation(
+        name="the_readme_swaps_the_corpora_in_the_region_sentence",
+        file="README.md",
+        old="71% on long-form prose, 67% on short text, 88% on very short strings",
+        new="71% on short text, 67% on long-form prose, 88% on very short strings",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # A blanket universal over a section that deliberately mixes our measurement
+    # with a third party's, which cancels the per-item sourcing around it.
+    Mutation(
+        name="the_readme_asserts_a_universal_over_the_mixed_sourcing",
+        file="README.md",
+        old="and where they compare, the comparison is the bundled",
+        new="and every figure below compares the bundled",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # Speed is ruled out of the published claim. A section-scoped ban let it in
+    # three headings down, where it reaches the same reader.
+    Mutation(
+        name="a_speed_figure_lands_under_the_sql_surface",
+        file="README.md",
+        old="There is no similarity or nearest-neighbour function, deliberately.",
+        new=(
+            "There is no similarity or nearest-neighbour function, deliberately. "
+            "It embeds 50,000 rows per second."
+        ),
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    # And the new assertions going blind, measured through the self-test.
+    Mutation(
+        name="the_quality_check_stops_reading_the_summary_table",
+        file="scripts/check_quality_claims.py",
+        old="    for label, series in TABLE_ROWS.items():",
+        new="    for label, series in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_requiring_a_whole_series",
+        file="scripts/check_quality_claims.py",
+        old="            if not written or len(written) == len(members):",
+        new="            if True:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_scanning_for_universals",
+        file="scripts/check_quality_claims.py",
+        old="    for match in UNIVERSAL.finditer(collapsed):",
+        new="    for match in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_expiring_a_permitted_universal",
+        file="scripts/check_quality_claims.py",
+        old="        if collapse(allowance.phrase) not in haystack:",
+        new="        if False:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_comparing_the_order_of_the_figures",
+        file="scripts/check_quality_claims.py",
+        old="    for index, (left, right) in enumerate(zip(in_readme, in_descriptor)):",
+        new="    for index, (left, right) in enumerate([]):",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_banning_speed_outside_the_section",
+        file="scripts/check_quality_claims.py",
+        old="    for phrase, reason in BANNED_ON_PAGE:",
+        new="    for phrase, reason in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The speed ban is the one scan that reads code, because the SQL examples
+    # are where a speed figure hides and `description.yml` publishes all of
+    # them in fenced blocks. Reading it after `strip_noise` instead makes it
+    # page-minus-code-wide, which is what it silently was.
+    Mutation(
+        name="the_speed_ban_stops_looking_inside_the_sql_examples",
+        file="scripts/check_quality_claims.py",
+        old="    collapsed = collapse(strip_addresses(page_text))",
+        new="    collapsed = collapse(strip_noise(page_text))",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # These two are the assertions a sweep found could be deleted with every
+    # self-test case still green, because in each the case was satisfied by a
+    # neighbouring assertion: the hedge case planted `only a minority survive`
+    # and the universal scan reported the `only`, and the empty-section case
+    # asked only that something was reported, which the missing CLAIMS pins
+    # do on their own. Both cases now name the message their own assertion
+    # produces, and these two mutations are what says so.
+    Mutation(
+        name="the_quality_check_stops_banning_the_hedges_the_figures_replaced",
+        file="scripts/check_quality_claims.py",
+        old="    for phrase, reason in BANNED_IN_SECTION:",
+        new="    for phrase, reason in []:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_reporting_an_empty_section_as_empty",
+        file="scripts/check_quality_claims.py",
+        old="    if not collapsed:",
+        new="    if False:",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # ── the gate's own wiring ────────────────────────────────────────────────
+    # `run` is where every assertion in that file is joined to the two pages it
+    # judges, and a self-test that calls the helpers directly cannot see it:
+    # each line below was deletable on its own with `--self-test` and the live
+    # check both at exit 0, and the last two reduced the whole gate to something
+    # that printed `ok:` and read nothing. The staged-tree cases at the foot of
+    # `self_test` are what kills them — they run `run`, and then this script as
+    # a process, over a temporary tree with one defect planted at a time.
+    Mutation(
+        name="the_quality_check_stops_judging_the_readme",
+        file="scripts/check_quality_claims.py",
+        old="    problems += region_problems(README, readme_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_judging_the_registry_entry",
+        file="scripts/check_quality_claims.py",
+        old='    problems += region_problems(f"{DESCRIPTOR} (extended_description)", descriptor_section)',
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_whether_the_two_pages_agree",
+        file="scripts/check_quality_claims.py",
+        old="    problems += disagreements(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_which_figures_are_unused",
+        file="scripts/check_quality_claims.py",
+        old="    problems += unused_figures(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_which_allowances_are_unused",
+        file="scripts/check_quality_claims.py",
+        old="    problems += unused_allowances(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_speed_ban_never_reaches_the_readme",
+        file="scripts/check_quality_claims.py",
+        old="    problems += page_problems(README, readme_text)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_speed_ban_never_reaches_the_registry_page",
+        file="scripts/check_quality_claims.py",
+        old='    problems += page_problems(f"{DESCRIPTOR} (the rendered page)", descriptor_page(descriptor))',
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_reading_the_model_revision",
+        file="scripts/check_quality_claims.py",
+        old="    problems += revision_problems(source_path.read_text())",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The one that made every other assertion decorative: collect the problems,
+    # then exit 0 and print `ok:` over them.
+    Mutation(
+        name="the_quality_check_reports_no_problem_it_found",
+        file="scripts/check_quality_claims.py",
+        old='    if problems:\n        print("FAIL: the published quality position does not hold up:", file=sys.stderr)',
+        new='    if False:\n        print("FAIL: the published quality position does not hold up:", file=sys.stderr)',
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_parses_its_arguments_and_stops",
+        file="scripts/check_quality_claims.py",
+        old="    return run(REPO_ROOT)",
+        new="    return 0",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The registry renders the worked example and the one-line blurb above the
+    # body. Reading the body alone is what the ban did while printing that it
+    # had read the whole page.
+    Mutation(
+        name="the_registry_page_narrows_to_the_body_again",
+        file="scripts/check_quality_claims.py",
+        old="    for table, field_name in PAGE_FIELDS:",
+        new='    for table, field_name in [("docs", "extended_description")]:',
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # And the defect that narrowing admits, on the real entry: a rows-per-second
+    # claim in the SQL a stranger reads first, and in the blurb above it.
+    Mutation(
+        name="a_speed_figure_lands_in_the_published_sql_example",
+        file="description.yml",
+        old="    -- 256 floats per row, for this model.",
+        new="    -- 256 floats per row, for this model. 50,000 rows per second.",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="a_speed_figure_lands_in_the_registry_blurb",
+        file="description.yml",
+        old="with no API key and no network call",
+        new="with no API key, no network call and 397x lower latency",
+        kind="script",
+        command=QUALITY_CLAIMS,
     ),
     # ── the engine's public behaviour ────────────────────────────────────────
     # Not "the first lookup is skipped": that is a fast path, and `recheck`

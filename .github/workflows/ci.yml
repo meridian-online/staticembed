@@ -121,6 +121,17 @@ jobs:
           python3 scripts/check_description_examples.py --self-test
           python3 scripts/check_description_examples.py --extension build/staticembed.duckdb_extension --require-complete
 
+      # The quality position, in the two files that publish it. Every figure a
+      # stranger reads before installing has to be one somebody measured, the
+      # registry page and README have to carry the same set, and a model bump
+      # reddens rather than leaving them describing weights that are no longer
+      # in the binary. The self-test runs first, for the same reason it does
+      # above.
+      - name: The two published pages agree about quality, and with the measurement
+        run: |
+          python3 scripts/check_quality_claims.py --self-test
+          python3 scripts/check_quality_claims.py
+
       # Anchors only: this validates that every mutation in the table still
       # names a line that exists and applies none of them, which is seconds. The
       # sweep itself rebuilds the release cdylib per mutation and stays local.
@@ -128,6 +139,26 @@ jobs:
       # mutation across three commits, unheard because nothing in CI asked.
       - name: The mutation table still points at code that exists
         run: python3 scripts/mutation_check.py --check-anchors
+
+      # And the checks themselves: neuter one branch of a checked script at a
+      # time and require the script to come back non-zero. It runs here rather
+      # than staying local because it needs no build and no duckdb.
+      #
+      # What it reaches is `if`, `for` and `problems +=` in the functions each
+      # target does not exclude — this script's own `main` among them, which was
+      # excluded by name until the sweep was pointed at it and reported five of
+      # its six sites deletable with every Python gate at exit 0. What it does
+      # not reach is list content: an entry dropped from CLAIMS, PAGE_FIELDS,
+      # BANNED_ON_PAGE or BANNED_IN_SECTION is not a branch. The script's
+      # docstring names which of those are open and hands them to
+      # scripts/mutation_check.py. Nor does it reach the marker that stops the
+      # sweep re-entering itself or the group kill that bounds a hang: both are
+      # expressions rather than branches, and the --self-test command in this
+      # step is the only thing that reddens for either.
+      - name: The branches this sweep enumerates redden when neutered
+        run: |
+          python3 scripts/check_assertions_can_fail.py --self-test
+          python3 scripts/check_assertions_can_fail.py
 
       - name: Report the artifact size
         run: ls -l build/staticembed.duckdb_extension
