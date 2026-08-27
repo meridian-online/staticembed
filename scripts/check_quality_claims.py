@@ -45,15 +45,18 @@ WHAT IS ASSERTED
        this covers and what it cannot see; it is the widest of these assertions
        and the one with the largest blind spot.
     8. No phrase in `BANNED_IN_SECTION` appears in either section — the hedges
-       the figures replaced. And no phrase in `BANNED_ON_PAGE` appears anywhere
-       on either page: speed was ruled out of the product claim on purpose,
+       the figures replaced. And no phrase in `BANNED_ON_PAGE` appears in
+       `README.md`, or in any of the `description.yml` fields listed in
+       `PAGE_FIELDS`: speed was ruled out of the product claim on purpose,
        because the embedding-only number is an order of magnitude larger than
        the end-to-end one, and a speed figure planted under *The SQL surface*
        flatters the product to the same reader as one planted here. That ban is
-       page-wide for that reason, not section-wide, and it is the one scan that
-       reads code as well as prose: `description.yml` publishes its SQL
-       examples in fenced blocks, so a ban that ran after code was stripped was
-       page-minus-code-wide and left the surface it was widened to cover open.
+       scoped to the page for that reason rather than to the section, and it is
+       the only scan here read over `strip_addresses` rather than `strip_noise`,
+       so it sees code as well as prose. It has to: `docs.hello_world` is a
+       published SQL example that is not fenced, `description.yml` fences the
+       rest and `README.md` fences its own, and a ban that ran after code was
+       stripped read none of them.
     9. The bundled model has not moved off `MEASURED_ON_REVISION`.
    10. Every entry in `FIGURES` and every entry in `ALLOWED_UNIVERSALS` is
        written on at least one of the two pages. A permitted value or a
@@ -78,9 +81,14 @@ WHAT THE UNIVERSAL-QUANTIFIER SCAN COVERS, AND WHAT IT CANNOT SEE
     quantifier at all. That is the largest hole and it is not closeable by
     widening the word list; this scan is a floor, not a proof.
 
-    It cannot see `invariably`, `in each case`, `without exception`, `bar none`,
-    or any other spelling not in `UNIVERSAL_WORDS`. Adding one is a one-line
-    change and should be made when one is met, rather than assumed absent.
+    It cannot see a spelling with no `UNIVERSAL_WORDS` member in it —
+    `invariably`, `without exception`, `universally`. It does see `in each case`
+    and `bar none`, which name no listed word and carry `each` and `none` as
+    whole words, so the list reaches further than reading it suggests. The
+    self-test pins both halves of that, because neither is derivable by eye and
+    the second invites a maintainer to widen a list that already covers it.
+    Adding a spelling is a one-line change and should be made when one is met,
+    rather than assumed absent.
 
     It does not judge truth. An entry in `ALLOWED_UNIVERSALS` is a person's
     recorded reason, not a derivation, and nothing here re-checks it. What it
@@ -121,9 +129,14 @@ document and a regex cannot tell one from the prose around it.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import pathlib
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 
@@ -132,6 +145,20 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 README = "README.md"
 DESCRIPTOR = "description.yml"
 MODEL_SOURCE = "models/potion-base-8M/SOURCE.md"
+
+#: What "the `description.yml` page" means to assertion 8, as (table, field).
+#: The registry renders all three: `extension.description` is the one-line
+#: blurb, `docs.hello_world` is the worked SQL example, and
+#: `docs.extended_description` is the body. Assertion 8 read the body alone
+#: until this existed, so a speed figure in the published example — the SQL a
+#: stranger reads first — passed it. `check_description_examples.py` searches
+#: the same two `docs` fields for the names of the functions the artifact
+#: registers, for the same reason: the example is part of what is read.
+PAGE_FIELDS: tuple[tuple[str, str], ...] = (
+    ("extension", "description"),
+    ("docs", "hello_world"),
+    ("docs", "extended_description"),
+)
 
 #: The level-2 heading whose section carries the quality position, in both
 #: files, spelled identically. Renaming it in one file is caught by assertion 1.
@@ -314,8 +341,9 @@ BANNED_IN_SECTION: list[tuple[str, str]] = [
     ("on the evidence we have", "a hedge standing where the corpus and the sample size belong"),
 ]
 
-#: Assertion 8, anywhere on either page. Speed is ruled out of the product claim
-#: and a speed figure three sections down reaches the same reader.
+#: Assertion 8, over `README.md` and the `PAGE_FIELDS` of `description.yml`.
+#: Speed is ruled out of the product claim, and a speed figure three sections
+#: down — or in the worked example above the prose — reaches the same reader.
 BANNED_ON_PAGE: list[tuple[str, str]] = [
     ("faster", "speed is not part of the published claim, deliberately"),
     ("speedup", "speed is not part of the published claim, deliberately"),
@@ -391,7 +419,8 @@ def strip_addresses(text: str) -> str:
     An address is not a quantity — `arxiv.org/abs/2510.24793` and `2026-08-24`
     both parse as one — and neither is it a claim about the product. Code is a
     different matter: it is where a speed figure hides. This is what assertion
-    8's page-wide half scans, so that half reads the SQL examples too.
+    8 scans over, so it reads the SQL examples — `docs.hello_world` raw, the
+    fenced ones as they are written — as well as the prose around them.
     """
     text = LINK_TARGET.sub("]", text)
     text = BARE_URL.sub(" ", text)
@@ -707,13 +736,17 @@ def region_problems(name: str, section_text: str | None) -> list[str]:
 
 
 def page_problems(name: str, page_text: str) -> list[str]:
-    """Assertion 8's page-wide half: speed vocabulary anywhere on the page.
+    """Assertion 8, over one whole page: speed vocabulary anywhere in `page_text`.
 
     Read over `strip_addresses` and not `strip_noise`, so fenced blocks and
-    inline code spans are scanned as well as prose. `description.yml` publishes
-    its SQL examples in fences and `README.md` carries six more, which is the
-    surface this ban was widened to cover: a speed figure in a comment inside
-    one reaches the same reader as a speed figure in a sentence.
+    inline code spans are scanned as well as prose. The SQL examples are the
+    surface this ban was widened to cover — a speed figure in a comment inside
+    one reaches the same reader as a speed figure in a sentence — and they are
+    not all fenced: `docs.hello_world` is published raw.
+
+    What `page_text` is for the registry entry is `PAGE_FIELDS` joined, which is
+    `descriptor_page`'s business and not this function's. Passing it one field
+    is how this scan came to assert a reach it did not have.
     """
     collapsed = collapse(strip_addresses(page_text))
     problems = []
@@ -727,6 +760,27 @@ def page_problems(name: str, page_text: str) -> list[str]:
                 f"reaches the same reader"
             )
     return problems
+
+
+def descriptor_page(descriptor: dict) -> str:
+    """The registry entry's page, assembled from `PAGE_FIELDS` in the order it renders.
+
+    Assertion 8 is scoped to this and not to `docs.extended_description`, which
+    is the one field it used to read. `docs.hello_world` is the worked SQL
+    example the registry shows above the body, and a speed figure in a comment
+    inside it reaches a stranger before the prose does.
+
+    A field this cannot find contributes nothing rather than raising: a
+    descriptor missing `docs.extended_description` is caught by `run` with a
+    message about what that field is, which is more use than a KeyError here.
+    """
+    parts = []
+    for table, field_name in PAGE_FIELDS:
+        values = descriptor.get(table)
+        value = values.get(field_name) if isinstance(values, dict) else None
+        if value:
+            parts.append(str(value))
+    return "\n".join(parts)
 
 
 def disagreements(readme_text: str | None, descriptor_text: str | None) -> list[str]:
@@ -787,6 +841,137 @@ def revision_problems(source_text: str) -> list[str]:
     return []
 
 
+def run(root: pathlib.Path) -> int:
+    """The whole check over one tree: read both pages, judge them, report, return an exit code.
+
+    `main` calls this on the repository this file lives in, and `self_test`
+    calls it on a staged tree with one defect planted at a time. That split is
+    the point rather than a tidiness: every assertion above is wired together
+    here and nowhere else, and a wiring line deleted here disables its assertion
+    while the assertion itself — and every self-test case that calls it directly
+    — stays green. Nine lines below were deletable one at a time with both CI
+    commands at exit 0, `if problems:` among them, which reduced the gate to
+    something that printed `ok:` and checked nothing.
+    """
+    try:
+        import yaml
+    except ImportError:
+        print(
+            "PyYAML is not installed. `extended_description` is a block scalar inside a YAML "
+            "document and a regex cannot tell one from the prose around it: pip install pyyaml",
+            file=sys.stderr,
+        )
+        return 2
+
+    readme_path = root / README
+    descriptor_path = root / DESCRIPTOR
+    source_path = root / MODEL_SOURCE
+    for path in (readme_path, descriptor_path, source_path):
+        if not path.is_file():
+            print(f"{path} is not in the tree", file=sys.stderr)
+            return 2
+
+    descriptor = yaml.safe_load(descriptor_path.read_text())
+    extended = (descriptor.get("docs") or {}).get("extended_description")
+    if not extended:
+        print(
+            f"{DESCRIPTOR} has no docs.extended_description. It is the registry page's body and "
+            f"the copy of the quality position a stranger reads",
+            file=sys.stderr,
+        )
+        return 1
+
+    readme_text = readme_path.read_text()
+    readme_section = section(readme_text, SECTION_HEADING)
+    descriptor_section = section(extended, SECTION_HEADING)
+
+    problems: list[str] = []
+    problems += region_problems(README, readme_section)
+    problems += region_problems(f"{DESCRIPTOR} (extended_description)", descriptor_section)
+    problems += disagreements(readme_section, descriptor_section)
+    problems += unused_figures(readme_section, descriptor_section)
+    problems += unused_allowances(readme_section, descriptor_section)
+    problems += page_problems(README, readme_text)
+    problems += page_problems(f"{DESCRIPTOR} (the rendered page)", descriptor_page(descriptor))
+    problems += revision_problems(source_path.read_text())
+
+    if problems:
+        print("FAIL: the published quality position does not hold up:", file=sys.stderr)
+        for problem in problems:
+            print(f"       {problem}", file=sys.stderr)
+        return 1
+
+    counted = len({round(value, 6) for value, _, _ in quantities(readme_section or "")})
+    print(
+        f"ok: {README} and {DESCRIPTOR} carry the same {counted} measured quantities under "
+        f"`## {SECTION_HEADING}`, in the same order, every one of them registered in FIGURES "
+        f"with its source; all {len(CLAIMS)} pinned claims present in both; every summary-table "
+        f"cell the figure FIGURES registers for its row and column; no partial series in any "
+        f"sentence; no universal quantifier outside the {len(ALLOWED_UNIVERSALS)} recorded in "
+        f"ALLOWED_UNIVERSALS; no banned hedge in either section; no speed vocabulary in "
+        f"{README} or in the {len(PAGE_FIELDS)} {DESCRIPTOR} fields the registry renders, their "
+        f"SQL examples included; every one of the {len(FIGURES)} registered figures written on "
+        f"at least one page; and the bundled model still at the revision they were published "
+        f"against"
+    )
+    return 0
+
+
+def stage_tree(root: pathlib.Path, tree: dict[str, str]) -> None:
+    """Write a whole two-page tree under `root`, for the self-test to run `run` against.
+
+    `run` reads a directory rather than a set of strings, so proving that it
+    wires its assertions together at all needs a directory to plant a defect in.
+    The descriptor is dumped and read back through PyYAML, so a case cannot pass
+    by writing YAML the real loader would read differently.
+    """
+    import yaml
+
+    (root / README).write_text(tree["readme"])
+    source = root / MODEL_SOURCE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(f"Revision: `{tree['revision']}`\n")
+    (root / DESCRIPTOR).write_text(
+        yaml.safe_dump(
+            {
+                "extension": {"name": "staticembed", "description": tree["blurb"]},
+                "docs": {
+                    "hello_world": tree["hello_world"],
+                    "extended_description": tree["extended"],
+                },
+            }
+        )
+    )
+
+
+def staged_run(tree: dict[str, str]) -> tuple[int, str]:
+    """`run` over a staged tree, as (exit code, everything it printed)."""
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        stage_tree(root, tree)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run(root)
+        return code, out.getvalue() + err.getvalue()
+
+
+def staged_process(tree: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    """This file, run as a process with no arguments, over a staged tree.
+
+    `staged_run` calls `run` directly, which leaves `main`'s dispatch to it —
+    the two lines the CI step actually reaches — with nothing behind them. The
+    file is copied into the staged tree so its own `REPO_ROOT` resolves there,
+    and then invoked the way CI invokes it.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = pathlib.Path(directory)
+        (root / "scripts").mkdir()
+        script = root / "scripts" / pathlib.Path(__file__).name
+        shutil.copy(pathlib.Path(__file__).resolve(), script)
+        stage_tree(root, tree)
+        return subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
+
+
 def self_test() -> int:  # noqa: C901
     """Plant each defect this is meant to catch, and require it to be reported.
 
@@ -804,6 +989,11 @@ def self_test() -> int:  # noqa: C901
     requires this self-test to redden. The rest of the assertions below have a
     case and no mutation, so for them this paragraph is a discipline and not a
     guarantee.
+
+    A case that calls one helper directly says nothing about whether `run` calls
+    that helper. The block at the foot stages a whole tree and drives `run` over
+    it, and then the script as a process, which is what closes that: it is where
+    a deleted wiring line reddens.
     """
     # FIGURES itself: assertion 5 reads one figure per (series, corpus), so two
     # entries claiming the same cell would make the table check pick arbitrarily.
@@ -1037,6 +1227,28 @@ def self_test() -> int:  # noqa: C901
     if universal_problems("a_file", "a vector from `all-MiniLM-L6-v2`") != []:
         print("self-test FAILED: a model name in a code span was read as a universal", file=sys.stderr)
         return 1
+    # Both halves of what the header says this scan reaches. Neither is readable
+    # off `UNIVERSAL_WORDS` by eye: `in each case` and `bar none` name no listed
+    # word and carry `each` and `none` as whole words, and a header that said
+    # they were invisible invited a maintainer to widen a list already covering
+    # them.
+    for unseen in ("invariably", "without exception", "universally"):
+        if universal_problems("a_file", f"the projection {unseen} loses neighbourhoods") != []:
+            print(
+                f"self-test FAILED: {unseen!r} was reported as a universal, and the header says "
+                f"this scan cannot see it",
+                file=sys.stderr,
+            )
+            return 1
+    for seen, word in (("in each case", "each"), ("bar none", "none")):
+        found = universal_problems("a_file", f"the projection loses neighbourhoods {seen}")
+        if not any(repr(word) in problem for problem in found):
+            print(
+                f"self-test FAILED: {seen!r} was not reported, and the header says this scan "
+                f"sees it through the whole word {word!r}: {found}",
+                file=sys.stderr,
+            )
+            return 1
     for allowance in ALLOWED_UNIVERSALS:
         if universal_problems("a_file", allowance.phrase) != []:
             print(
@@ -1239,6 +1451,163 @@ def self_test() -> int:  # noqa: C901
         print("self-test FAILED: a missing Revision: line reported clean", file=sys.stderr)
         return 1
 
+    # ── the whole check, over a staged tree ──────────────────────────────────
+    # Every case above calls one helper directly, which leaves `run` — the only
+    # place the helpers are wired together — with nothing behind it. Nine of its
+    # lines could each be deleted on their own with this self-test and the live
+    # check both at exit 0, `if problems:` among them, which turned the gate
+    # into something that printed `ok:` and checked nothing. One assertion per
+    # line, written by hand, would repeat the shape that let that happen: these
+    # drive `run` end to end over a temporary tree instead, one planted defect
+    # at a time, and each names the message its wiring line produces.
+    try:
+        import yaml  # noqa: F401
+    except ImportError:
+        print(
+            "self-test FAILED: PyYAML is not installed, and the staged-tree cases below write a "
+            "description.yml and read it back through the loader the live check uses. A case "
+            "that is skipped is a case that cannot fail: pip install pyyaml",
+            file=sys.stderr,
+        )
+        return 1
+
+    allowance_line = "any phrase and its shuffle land in the same place."
+    readme_page = (
+        "# staticembed\n\nA vector for a string, from a model bundled in the binary.\n\n"
+        f"## {SECTION_HEADING}\n\n{good}\n"
+        "## The SQL surface\n\n`embed()` is a scalar function.\n"
+    )
+    extended_page = (
+        "`staticembed` turns a string into a vector inside DuckDB.\n\n"
+        f"## {SECTION_HEADING}\n\n{good}\n"
+    )
+    clean_tree = {
+        "readme": readme_page,
+        "blurb": "Static text embeddings as a DuckDB scalar, from a model in the binary",
+        "hello_world": "-- 256 floats per row, for this model.\nSELECT embed(name) FROM t;\n",
+        "extended": extended_page,
+        "revision": MEASURED_ON_REVISION,
+    }
+    code, report = staged_run(clean_tree)
+    if code != 0:
+        print(
+            f"self-test FAILED: a staged tree with nothing wrong with it exited {code}. Every "
+            f"case below plants one defect into this tree, so they prove nothing while it is "
+            f"reported broken for some other reason: {report}",
+            file=sys.stderr,
+        )
+        return 1
+
+    hedged = good + " a minority survive.\n"
+    a_whole_series = (
+        good
+        + " Overlap runs 13% on long-form prose, 28% on short text, 40% on very short strings.\n"
+    )
+    for label, override, needle in (
+        (
+            "a hedge on the README's side and not the registry entry's",
+            {"readme": readme_page.replace(good, hedged)},
+            f"{README}'s section contains 'a minority'",
+        ),
+        (
+            "a hedge on the registry entry's side and not the README's",
+            {"extended": extended_page.replace(good, hedged)},
+            f"{DESCRIPTOR} (extended_description)'s section contains 'a minority'",
+        ),
+        (
+            "a figure written on one page and not the other",
+            {"readme": readme_page.replace(good, a_whole_series)},
+            "does not, or does not claim it as often",
+        ),
+        (
+            "a registered figure neither page writes any more",
+            {
+                "readme": readme_page.replace("0.3924 against 0.3510", "0.3924"),
+                "extended": extended_page.replace("0.3924 against 0.3510", "0.3924"),
+            },
+            "A permitted value nothing uses",
+        ),
+        (
+            "a permitted universal neither page writes any more",
+            {
+                "readme": readme_page.replace(allowance_line, ""),
+                "extended": extended_page.replace(allowance_line, ""),
+            },
+            "A live exception to the universal-quantifier scan",
+        ),
+        (
+            "a speed figure in the README, three headings below the quality section",
+            {
+                "readme": readme_page.replace(
+                    "`embed()` is a scalar function.",
+                    "`embed()` is a scalar function. It embeds 50,000 rows per second.",
+                )
+            },
+            f"{README} contains 'per second'",
+        ),
+        # The two fields assertion 8 could not see. `docs.hello_world` is the
+        # worked example the registry renders above the body, and it is raw SQL
+        # rather than a fenced block: a rows-per-second comment in it published
+        # exactly the claim AC6 excludes, under a check printing that there was
+        # no speed vocabulary anywhere on the page.
+        (
+            "a speed figure in the registry entry's published SQL example",
+            {
+                "hello_world": "-- 256 floats per row, and 50,000 rows per second.\n"
+                "SELECT embed(name) FROM t;\n"
+            },
+            f"{DESCRIPTOR} (the rendered page) contains 'per second'",
+        ),
+        (
+            "a speed figure in the registry entry's one-line blurb",
+            {"blurb": "Static text embeddings as a DuckDB scalar, at 397x lower latency"},
+            f"{DESCRIPTOR} (the rendered page) contains 'latency'",
+        ),
+        (
+            "the bundled model moved off the revision the figures were published against",
+            {"revision": "0" * 40},
+            "re-run the harness and update FIGURES",
+        ),
+    ):
+        code, report = staged_run({**clean_tree, **override})
+        if code != 1:
+            print(
+                f"self-test FAILED: {label} — the staged tree exited {code} and a reported "
+                f"problem is exit 1. What it printed: {report}",
+                file=sys.stderr,
+            )
+            return 1
+        if needle not in report:
+            print(
+                f"self-test FAILED: {label} — nothing it reported carried {needle!r}, which is "
+                f"the message the assertion this case is written for produces. What it printed: "
+                f"{report}",
+                file=sys.stderr,
+            )
+            return 1
+
+    # And the same check the way CI reaches it: as a process, through `main`,
+    # with no arguments. Everything above calls `run` directly, so `main`'s
+    # dispatch to it is the last wiring here with no case behind it.
+    clean_process = staged_process(clean_tree)
+    if clean_process.returncode != 0:
+        print(
+            f"self-test FAILED: this script, run as a process over a staged tree with nothing "
+            f"wrong with it, exited {clean_process.returncode}: "
+            f"{clean_process.stdout}{clean_process.stderr}",
+            file=sys.stderr,
+        )
+        return 1
+    broken_process = staged_process({**clean_tree, "revision": "0" * 40})
+    if broken_process.returncode != 1:
+        print(
+            f"self-test FAILED: this script, run as a process over a staged tree with a bumped "
+            f"model revision, exited {broken_process.returncode} rather than 1. `main` reaches "
+            f"the check through one line and that line is what this case holds",
+            file=sys.stderr,
+        )
+        return 1
+
     print(
         f"self-test ok: {len(FIGURES)} measured figures, {len(CLAIMS)} pinned claims, "
         f"{len(TABLE_ROWS)} summary-table rows read cell by cell, {len(DIRECTIONAL_SERIES)} "
@@ -1254,7 +1623,14 @@ def self_test() -> int:  # noqa: C901
         f"nothing else wrong with it, a speed figure outside the quality section and a speed "
         f"figure inside a fenced example, a one-sided figure in either direction, the same "
         f"figures in a different order, a figure written a different number of times, a "
-        f"registered figure no page writes and a bumped model revision are each reported"
+        f"registered figure no page writes and a bumped model revision are each reported; "
+        f"`in each case` and `bar none` are seen through the whole words `each` and `none` "
+        f"while `invariably` and `without exception` are not; and over a tree staged in a "
+        f"temporary directory the whole of `run` reports a hedge on either page alone, a figure "
+        f"on one page alone, a figure and a permitted universal neither page writes, a speed "
+        f"figure below the quality section, in the registry entry's published SQL example and "
+        f"in its one-line blurb, and a bumped revision — with this file run as a process for "
+        f"`main`'s own dispatch to it"
     )
     return 0
 
@@ -1266,69 +1642,7 @@ def main() -> int:
 
     if args.self_test:
         return self_test()
-
-    try:
-        import yaml
-    except ImportError:
-        print(
-            "PyYAML is not installed. `extended_description` is a block scalar inside a YAML "
-            "document and a regex cannot tell one from the prose around it: pip install pyyaml",
-            file=sys.stderr,
-        )
-        return 2
-
-    problems: list[str] = []
-
-    readme_path = REPO_ROOT / README
-    descriptor_path = REPO_ROOT / DESCRIPTOR
-    source_path = REPO_ROOT / MODEL_SOURCE
-    for path in (readme_path, descriptor_path, source_path):
-        if not path.is_file():
-            print(f"{path} is not in the tree", file=sys.stderr)
-            return 2
-
-    descriptor = yaml.safe_load(descriptor_path.read_text())
-    extended = (descriptor.get("docs") or {}).get("extended_description")
-    if not extended:
-        print(
-            f"{DESCRIPTOR} has no docs.extended_description. It is the registry page's body and "
-            f"the copy of the quality position a stranger reads",
-            file=sys.stderr,
-        )
-        return 1
-
-    readme_text = readme_path.read_text()
-    readme_section = section(readme_text, SECTION_HEADING)
-    descriptor_section = section(extended, SECTION_HEADING)
-
-    problems += region_problems(README, readme_section)
-    problems += region_problems(f"{DESCRIPTOR} (extended_description)", descriptor_section)
-    problems += disagreements(readme_section, descriptor_section)
-    problems += unused_figures(readme_section, descriptor_section)
-    problems += unused_allowances(readme_section, descriptor_section)
-    problems += page_problems(README, readme_text)
-    problems += page_problems(f"{DESCRIPTOR} (extended_description)", extended)
-    problems += revision_problems(source_path.read_text())
-
-    if problems:
-        print("FAIL: the published quality position does not hold up:", file=sys.stderr)
-        for problem in problems:
-            print(f"       {problem}", file=sys.stderr)
-        return 1
-
-    counted = len({round(value, 6) for value, _, _ in quantities(readme_section or "")})
-    print(
-        f"ok: {README} and {DESCRIPTOR} carry the same {counted} measured quantities under "
-        f"`## {SECTION_HEADING}`, in the same order, every one of them registered in FIGURES "
-        f"with its source; all {len(CLAIMS)} pinned claims present in both; every summary-table "
-        f"cell the figure FIGURES registers for its row and column; no partial series in any "
-        f"sentence; no universal quantifier outside the {len(ALLOWED_UNIVERSALS)} recorded in "
-        f"ALLOWED_UNIVERSALS; no banned hedge in either section and no speed vocabulary anywhere "
-        f"on either page, in its code examples as well as its prose; every one of the "
-        f"{len(FIGURES)} registered figures written on at least "
-        f"one page; and the bundled model still at the revision they were published against"
-    )
-    return 0
+    return run(REPO_ROOT)
 
 
 if __name__ == "__main__":

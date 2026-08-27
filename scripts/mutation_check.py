@@ -799,6 +799,125 @@ MUTATIONS: list[Mutation] = [
         kind="script",
         command=QUALITY_CLAIMS_SELF_TEST,
     ),
+    # ── the gate's own wiring ────────────────────────────────────────────────
+    # `run` is where every assertion in that file is joined to the two pages it
+    # judges, and a self-test that calls the helpers directly cannot see it:
+    # each line below was deletable on its own with `--self-test` and the live
+    # check both at exit 0, and the last two reduced the whole gate to something
+    # that printed `ok:` and read nothing. The staged-tree cases at the foot of
+    # `self_test` are what kills them — they run `run`, and then this script as
+    # a process, over a temporary tree with one defect planted at a time.
+    Mutation(
+        name="the_quality_check_stops_judging_the_readme",
+        file="scripts/check_quality_claims.py",
+        old="    problems += region_problems(README, readme_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_judging_the_registry_entry",
+        file="scripts/check_quality_claims.py",
+        old='    problems += region_problems(f"{DESCRIPTOR} (extended_description)", descriptor_section)',
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_whether_the_two_pages_agree",
+        file="scripts/check_quality_claims.py",
+        old="    problems += disagreements(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_which_figures_are_unused",
+        file="scripts/check_quality_claims.py",
+        old="    problems += unused_figures(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_never_asks_which_allowances_are_unused",
+        file="scripts/check_quality_claims.py",
+        old="    problems += unused_allowances(readme_section, descriptor_section)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_speed_ban_never_reaches_the_readme",
+        file="scripts/check_quality_claims.py",
+        old="    problems += page_problems(README, readme_text)",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_speed_ban_never_reaches_the_registry_page",
+        file="scripts/check_quality_claims.py",
+        old='    problems += page_problems(f"{DESCRIPTOR} (the rendered page)", descriptor_page(descriptor))',
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_stops_reading_the_model_revision",
+        file="scripts/check_quality_claims.py",
+        old="    problems += revision_problems(source_path.read_text())",
+        new="    pass",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The one that made every other assertion decorative: collect the problems,
+    # then exit 0 and print `ok:` over them.
+    Mutation(
+        name="the_quality_check_reports_no_problem_it_found",
+        file="scripts/check_quality_claims.py",
+        old='    if problems:\n        print("FAIL: the published quality position does not hold up:", file=sys.stderr)',
+        new='    if False:\n        print("FAIL: the published quality position does not hold up:", file=sys.stderr)',
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    Mutation(
+        name="the_quality_check_parses_its_arguments_and_stops",
+        file="scripts/check_quality_claims.py",
+        old="    return run(REPO_ROOT)",
+        new="    return 0",
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # The registry renders the worked example and the one-line blurb above the
+    # body. Reading the body alone is what the ban did while printing that it
+    # had read the whole page.
+    Mutation(
+        name="the_registry_page_narrows_to_the_body_again",
+        file="scripts/check_quality_claims.py",
+        old="    for table, field_name in PAGE_FIELDS:",
+        new='    for table, field_name in [("docs", "extended_description")]:',
+        kind="script",
+        command=QUALITY_CLAIMS_SELF_TEST,
+    ),
+    # And the defect that narrowing admits, on the real entry: a rows-per-second
+    # claim in the SQL a stranger reads first, and in the blurb above it.
+    Mutation(
+        name="a_speed_figure_lands_in_the_published_sql_example",
+        file="description.yml",
+        old="    -- 256 floats per row, for this model.",
+        new="    -- 256 floats per row, for this model. 50,000 rows per second.",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
+    Mutation(
+        name="a_speed_figure_lands_in_the_registry_blurb",
+        file="description.yml",
+        old="with no API key and no network call",
+        new="with no API key, no network call and 397x lower latency",
+        kind="script",
+        command=QUALITY_CLAIMS,
+    ),
     # ── the engine's public behaviour ────────────────────────────────────────
     # Not "the first lookup is skipped": that is a fast path, and `recheck`
     # answers the same question a few lines later, so removing it changes no
